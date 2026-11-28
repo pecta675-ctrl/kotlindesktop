@@ -45,6 +45,7 @@ fun ContinueCard(
     onDetails: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    upscaled: Boolean = false,
 ) {
     val anime = entry.anime
     val fraction = if (entry.progress.duration > 0.0)
@@ -96,6 +97,20 @@ fun ContinueCard(
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                 onClick = { onRemove(anime.id) },
             )
+            if (upscaled) {
+                Text(
+                    "4K",
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 8.dp, bottom = 10.dp)
+                        .clip(CircleShape)
+                        .background(AniLifeColors.Gold)
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    color = AniLifeColors.GoldForeground,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)

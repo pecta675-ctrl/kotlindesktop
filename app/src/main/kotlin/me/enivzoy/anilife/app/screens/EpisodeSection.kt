@@ -49,6 +49,9 @@ import kotlinx.coroutines.CancellationException
 import me.enivzoy.anilife.app.data.AnimeEpisode
 import me.enivzoy.anilife.app.data.AnimeVideoProviders
 import me.enivzoy.anilife.app.data.ContinueProgress
+import me.enivzoy.anilife.app.data.LocalEpisode
+import me.enivzoy.anilife.app.data.LocalPlayback
+import me.enivzoy.anilife.app.data.isUpscaled
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
@@ -62,6 +65,7 @@ internal fun EpisodeSection(
     providers: AnimeVideoProviders,
     aniListWatchedEpisodes: Int = 0,
     continueProgress: ContinueProgress? = null,
+    localEpisodes: List<LocalEpisode> = emptyList(),
     onWatchEpisode: (Double) -> Unit,
 ) {
     var episodes by remember(detail.id) { mutableStateOf<List<AnimeEpisode>>(emptyList()) }
@@ -143,6 +147,11 @@ internal fun EpisodeSection(
                 },
                 aniListWatchedEpisodes = aniListWatchedEpisodes,
                 continueProgress = continueProgress,
+                localByEpisode = LocalPlayback.entriesFor(localEpisodes, detail.id, detail.title)
+                    .groupBy(LocalEpisode::episode)
+                    .mapValues { (_, list) ->
+                        list.sortedBy { if (it.isUpscaled()) 0 else 1 }.first()
+                    },
                 onWatchEpisode = onWatchEpisode,
             )
         }
@@ -155,6 +164,7 @@ private fun EpisodePicker(
     fallbackArt: String?,
     aniListWatchedEpisodes: Int,
     continueProgress: ContinueProgress?,
+    localByEpisode: Map<Double, LocalEpisode>,
     onWatchEpisode: (Double) -> Unit,
 ) {
     var newestFirst by remember { mutableStateOf(false) }
@@ -206,10 +216,11 @@ private fun EpisodePicker(
         ) {
             items(visible, key = AnimeEpisode::number) { episode ->
                 val progress = episodeWatchProgress(episode.number, aniListWatchedEpisodes, continueProgress)
+                val downloaded = localByEpisode[episode.number]
                 if (compact) {
-                    CompactEpisodeButton(episode, progress, onWatchEpisode)
+                    CompactEpisodeButton(episode, progress, downloaded, onWatchEpisode)
                 } else {
-                    EpisodeCard(episode, fallbackArt, progress, onWatchEpisode)
+                    EpisodeCard(episode, fallbackArt, progress, downloaded, onWatchEpisode)
                 }
             }
         }
@@ -222,6 +233,7 @@ private fun EpisodeCard(
     episode: AnimeEpisode,
     fallbackArt: String?,
     progress: EpisodeWatchProgress?,
+    downloaded: LocalEpisode?,
     onClick: (Double) -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
@@ -288,6 +300,19 @@ private fun EpisodeCard(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
+            if (downloaded != null) {
+                Text(
+                    if (downloaded.isUpscaled()) "4K UPSCALED" else "DOWNLOADED",
+                    Modifier.align(Alignment.BottomStart)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (downloaded.isUpscaled()) AniLifeColors.Gold else AniLifeColors.Primary)
+                        .padding(horizontal = 7.dp, vertical = 4.dp),
+                    color = if (downloaded.isUpscaled()) AniLifeColors.GoldForeground else AniLifeColors.PrimaryForeground,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
         Text(
             episode.title?.takeIf(String::isNotBlank) ?: "Episode ${formatEpisodeNumber(episode.number)}",
@@ -315,6 +340,7 @@ private fun EpisodeCard(
 private fun CompactEpisodeButton(
     episode: AnimeEpisode,
     progress: EpisodeWatchProgress?,
+    downloaded: LocalEpisode?,
     onClick: (Double) -> Unit,
 ) {
     val shape = RoundedCornerShape(8.dp)
@@ -334,6 +360,14 @@ private fun CompactEpisodeButton(
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
         )
+        if (downloaded != null) {
+            Text(
+                if (downloaded.isUpscaled()) "4K" else "DL",
+                color = if (downloaded.isUpscaled()) AniLifeColors.Gold else AniLifeColors.Primary,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
         progress?.let { EpisodeProgressBar(it.fraction, Modifier.padding(top = 6.dp)) }
     }
 }

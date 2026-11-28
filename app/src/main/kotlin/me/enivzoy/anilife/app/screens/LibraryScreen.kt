@@ -67,6 +67,7 @@ import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.AnimePosterCard
 import me.enivzoy.anilife.app.ui.appEnter
 import me.enivzoy.anilife.app.ui.EmptyPanel
+import me.enivzoy.anilife.app.data.isUpscaled
 import me.enivzoy.anilife.app.ui.PageScrollbar
 
 @Composable
@@ -76,6 +77,10 @@ fun LibraryScreen(
     onBrowse: () -> Unit,
 ) {
     val localEntries by repository.libraryEntries.collectAsState()
+    val localEpisodes by repository.localEpisodes.collectAsState()
+    val upscaledIds = remember(localEpisodes) {
+        localEpisodes.filter { it.isUpscaled() }.mapTo(mutableSetOf()) { it.anime.id }
+    }
     val user by AniListSync.user.collectAsState()
     val remoteEntries by AniListSync.entries.collectAsState()
     val syncStatus by AniListSync.status.collectAsState()
@@ -90,11 +95,13 @@ fun LibraryScreen(
             scoreFormat = user!!.scoreFormat,
             syncMessage = syncStatus.message,
             syncing = syncStatus.syncing,
+            upscaledIds = upscaledIds,
             onOpen = onOpen,
             onBrowse = onBrowse,
         )
         else -> LocalLibrary(
             entries = localEntries,
+            upscaledIds = upscaledIds,
             onOpen = onOpen,
             onBrowse = onBrowse,
         )
@@ -104,6 +111,7 @@ fun LibraryScreen(
 @Composable
 private fun LocalLibrary(
     entries: List<me.enivzoy.anilife.core.model.AnimeCard>,
+    upscaledIds: Set<Long>,
     onOpen: (Long) -> Unit,
     onBrowse: () -> Unit,
 ) {
@@ -154,6 +162,7 @@ private fun LocalLibrary(
                             anime = anime,
                             onClick = { onOpen(anime.id) },
                             width = 160.dp,
+                            upscaled = anime.id in upscaledIds,
                         )
                     }
                 }
@@ -170,6 +179,7 @@ private fun AniListLibrary(
     scoreFormat: AniListScoreFormat,
     syncMessage: String?,
     syncing: Boolean,
+    upscaledIds: Set<Long>,
     onOpen: (Long) -> Unit,
     onBrowse: () -> Unit,
 ) {
@@ -268,6 +278,7 @@ private fun AniListLibrary(
                                 anime = entry.anime,
                                 onClick = { onOpen(entry.anime.id) },
                                 width = 160.dp,
+                                upscaled = entry.anime.id in upscaledIds,
                             )
                         }
                         if (showEditor) {

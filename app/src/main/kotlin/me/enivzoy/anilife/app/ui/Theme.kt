@@ -80,6 +80,8 @@ object AniLifeColors {
     val Score get() = token("score", 0xFF87D66A)
     val Success get() = token("success", 0xFF57F287)
     val Warning get() = token("warning", 0xFFFBBF24)
+    val Gold get() = token("gold", 0xFFE3B341)
+    val GoldForeground get() = token("gold-foreground", 0xFF1F1600)
     val Scrim get() = token("scrim", 0xCC000000)
     val Chip get() = token("chip", 0xE60A0F0A)
     val ChipOverlay get() = token("chip-overlay", 0xCC262626)

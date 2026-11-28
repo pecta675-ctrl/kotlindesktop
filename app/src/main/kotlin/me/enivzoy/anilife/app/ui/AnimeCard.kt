@@ -45,6 +45,7 @@ fun AnimePosterCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     width: Dp? = 160.dp,
+    upscaled: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -94,6 +95,9 @@ fun AnimePosterCard(
             val nextAiring = anime.nextAiring
             if (nextAiring != null) {
                 NextAiringTag(nextAiring, Modifier.align(Alignment.BottomEnd).padding(6.dp))
+            }
+            if (upscaled) {
+                UpscaledTag(Modifier.align(Alignment.BottomStart).padding(6.dp))
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {

@@ -73,6 +73,9 @@ import me.enivzoy.anilife.app.data.AnimeVideoProviders
 import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.data.AnimeVideoSource
 import me.enivzoy.anilife.app.data.MediaAutoDetector
+import me.enivzoy.anilife.app.data.LocalEpisode
+import me.enivzoy.anilife.app.data.isUpscaled
+import me.enivzoy.anilife.app.data.matchesAnime
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.AudioType
 import me.enivzoy.anilife.app.ui.AnimePosterCard
@@ -165,6 +168,8 @@ fun DetailScreen(
                     } else null,
                     queueManager = queueManager,
                     settings = settings,
+                    localEpisodes = localEpisodes,
+                    upscaled = localEpisodes.any { it.matchesAnime(current.value.id, current.value.title) && it.isUpscaled() },
                     onDownloadClick = { showDownloadDialog = true },
                     onToggleLibrary = {
                     val remoteEntry = aniListEntries.firstOrNull { it.anime.id == current.value.id }
@@ -365,6 +370,8 @@ private fun DetailContent(
     onEditAniListEntry: (() -> Unit)? = null,
     queueManager: me.enivzoy.anilife.app.data.DownloadQueueManager? = null,
     settings: AppSettings? = null,
+    localEpisodes: List<LocalEpisode> = emptyList(),
+    upscaled: Boolean = false,
     onDownloadClick: () -> Unit = {},
 ) {
     var expanded by remember(detail.id) { mutableStateOf(false) }
@@ -469,6 +476,13 @@ private fun DetailContent(
                                     text = (if (detail.format == "MOVIE") "Out" else "Episode ${next.episode}") + " " + countdown(next.airingAt),
                                     container = Color.Transparent,
                                     content = AniLifeColors.MutedForeground,
+                                )
+                            }
+                            if (upscaled) {
+                                Chip(
+                                    text = "4K UPSCALED",
+                                    container = AniLifeColors.Gold,
+                                    content = AniLifeColors.GoldForeground,
                                 )
                             }
                         }
@@ -610,6 +624,7 @@ private fun DetailContent(
                     detail = detail,
                     providers = providers,
                     relationCards = relationCards,
+                    localEpisodes = localEpisodes,
                     onOpen = onOpen,
                     onWatch = onWatch,
                 )
@@ -654,6 +669,7 @@ private fun DetailSections(
     detail: AnimeDetail,
     providers: AnimeVideoProviders,
     relationCards: List<me.enivzoy.anilife.core.model.AnimeCard>,
+    localEpisodes: List<LocalEpisode>,
     onOpen: (Long) -> Unit,
     onWatch: (Double?) -> Unit,
 ) {
@@ -700,6 +716,7 @@ private fun DetailSections(
                 providers = providers,
                 aniListWatchedEpisodes = watchedEpisodes,
                 continueProgress = continueProgress,
+                localEpisodes = localEpisodes,
             ) { episode -> onWatch(episode) }
             "Characters" -> LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 itemsIndexed(

@@ -63,6 +63,7 @@ import me.enivzoy.anilife.app.data.AniListListStatus
 import me.enivzoy.anilife.app.data.AniListSync
 import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.data.HomeSection
+import me.enivzoy.anilife.app.data.isUpscaled
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.AnimePosterCard
 import me.enivzoy.anilife.app.ui.adaptiveGlass
@@ -129,6 +130,10 @@ private fun HomeContent(
 ) {
     val continueEntries by ContinueStoreInstance.entries.collectAsState()
     val libraryEntries by repository.library.entries.collectAsState()
+    val localEpisodes by repository.localEpisodes.collectAsState()
+    val upscaledIds = remember(localEpisodes) {
+        localEpisodes.filter { it.isUpscaled() }.mapTo(mutableSetOf()) { it.anime.id }
+    }
     val aniListEntries by AniListSync.entries.collectAsState()
     LaunchedEffect(aniListEntries) {
         aniListEntries.filter { it.status == AniListListStatus.CURRENT }.forEach { entry ->
@@ -216,6 +221,7 @@ private fun HomeContent(
                                         onResume = { e -> onContinue(e) },
                                         onDetails = onOpen,
                                         onRemove = { id -> ContinueStoreInstance.remove(id) },
+                                        upscaled = entry.anime.id in upscaledIds,
                                     )
                                 }
                             }
@@ -229,12 +235,13 @@ private fun HomeContent(
                                 title = "Because you watched ${becauseSeed!!.title}",
                                 items = becauseItems,
                                 onOpen = onOpen,
+                                upscaledIds = upscaledIds,
                             )
                             Spacer(Modifier.height(38.dp))
                         }
                     }
 
-                    HomeSection.NEW_EPISODES -> addHomeRow(section, home.newest, onOpen)
+                    HomeSection.NEW_EPISODES -> addHomeRow(section, home.newest, onOpen, upscaledIds)
                     HomeSection.TRENDING_NOW -> if (spotlightItems.isNotEmpty()) {
                         item(key = "spotlight") {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -264,7 +271,11 @@ private fun HomeContent(
                                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                                 ) {
                                     items(spotlightItems, key = { it.id }) { anime ->
-                                        AnimePosterCard(anime = anime, onClick = { onOpen(anime.id); heroAnime = anime })
+                                        AnimePosterCard(
+                                            anime = anime,
+                                            onClick = { onOpen(anime.id); heroAnime = anime },
+                                            upscaled = anime.id in upscaledIds,
+                                        )
                                     }
                                 }
                             }
@@ -272,14 +283,14 @@ private fun HomeContent(
                         }
                     }
 
-                    HomeSection.THIS_SEASON -> addHomeRow(section, home.seasonal, onOpen)
-                    HomeSection.ALL_TIME_POPULAR -> addHomeRow(section, home.popular, onOpen)
-                    HomeSection.TOP_RATED -> addHomeRow(section, home.topRated, onOpen)
-                    HomeSection.MOVIES -> addHomeRow(section, home.movies, onOpen)
-                    HomeSection.COMING_SOON -> addHomeRow(section, home.upcoming, onOpen)
+                    HomeSection.THIS_SEASON -> addHomeRow(section, home.seasonal, onOpen, upscaledIds)
+                    HomeSection.ALL_TIME_POPULAR -> addHomeRow(section, home.popular, onOpen, upscaledIds)
+                    HomeSection.TOP_RATED -> addHomeRow(section, home.topRated, onOpen, upscaledIds)
+                    HomeSection.MOVIES -> addHomeRow(section, home.movies, onOpen, upscaledIds)
+                    HomeSection.COMING_SOON -> addHomeRow(section, home.upcoming, onOpen, upscaledIds)
                     HomeSection.MY_LIBRARY -> if (libraryEntries.isNotEmpty()) {
                         item(key = "library") {
-                            AnimeRow(title = section.label, items = libraryEntries, onOpen = onOpen)
+                            AnimeRow(title = section.label, items = libraryEntries, onOpen = onOpen, upscaledIds = upscaledIds)
                             Spacer(Modifier.height(38.dp))
                         }
                     }
@@ -325,10 +336,11 @@ private fun androidx.compose.foundation.lazy.LazyListScope.addHomeRow(
     section: HomeSection,
     items: List<AnimeCard>,
     onOpen: (Long) -> Unit,
+    upscaledIds: Set<Long>,
 ) {
     if (items.isEmpty()) return
     item(key = section.name) {
-        AnimeRow(title = section.label, items = items, onOpen = onOpen)
+        AnimeRow(title = section.label, items = items, onOpen = onOpen, upscaledIds = upscaledIds)
         Spacer(Modifier.height(38.dp))
     }
 }

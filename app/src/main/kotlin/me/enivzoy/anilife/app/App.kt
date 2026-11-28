@@ -62,6 +62,9 @@ import me.enivzoy.anilife.app.data.DiscordPresenceManager
 import me.enivzoy.anilife.app.data.DownloadQueueManager
 import me.enivzoy.anilife.app.data.DirectMediaDownloader
 import me.enivzoy.anilife.app.data.DownloadStatus
+import me.enivzoy.anilife.app.data.LocalPlayback
+import me.enivzoy.anilife.app.data.isUpscaled
+import me.enivzoy.anilife.app.data.toDetail
 import me.enivzoy.anilife.app.data.ProviderCatalog
 import me.enivzoy.anilife.app.screens.BrowseScreen
 import me.enivzoy.anilife.app.screens.AnimeWatchScreen
@@ -88,6 +91,7 @@ import me.enivzoy.anilife.app.data.ChecksumException
 import me.enivzoy.anilife.app.data.redactForLog
 import me.enivzoy.anilife.app.data.MpvBootstrap
 import me.enivzoy.anilife.app.data.NoticeStoreInstance
+import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.data.ReleaseNotifier
 import me.enivzoy.anilife.core.model.Update
 import me.enivzoy.anilife.core.model.AnimeCard
@@ -392,16 +396,68 @@ fun AniLifeApp(
         }
     }
 
+    fun localPlayerScreen(
+        detail: AnimeDetail,
+        entry: me.enivzoy.anilife.app.data.LocalEpisode,
+    ): Screen.Player {
+        val all = repository.localEpisodes.value
+        val quality = if (entry.isUpscaled()) "4K" else "Downloaded"
+        return Screen.Player(
+            title = "${detail.title} · Episode ${formatPlayerEpisode(entry.episode)} · $quality",
+            url = entry.path.toUri().toString(),
+            detail = detail,
+            episode = entry.episode,
+            episodeTitle = entry.episodeTitle,
+            episodes = LocalPlayback.seriesEpisodes(all, detail.id, detail.title, detail.episodes),
+            audioTrack = entry.audio,
+        )
+    }
+
     suspend fun resolvePlayerEpisode(target: Screen.Player, episode: Double, audio: String) {
         val anime = target.detail ?: return
+        val current = screen as? Screen.Player ?: return
+        if (current.detail?.id != anime.id) return
+        val label = formatPlayerEpisode(episode)
+        val local = me.enivzoy.anilife.app.data.LocalPlayback.find(
+            entries = repository.localEpisodes.value,
+            animeId = anime.id,
+            title = anime.title,
+            episode = episode,
+            audio = audio,
+        )
+        if (local != null) {
+            val quality = if (local.isUpscaled()) "4K" else "Downloaded"
+            logger.info { "local playback used episode=$episode audio=${local.audio}" }
+            screen = current.copy(
+                title = "${anime.title} · Episode $label · $quality",
+                url = local.path.toUri().toString(),
+                headers = emptyMap(),
+                alternatives = emptyList(),
+                audioTrack = local.audio,
+                audioResolving = false,
+                audioError = null,
+                episode = episode,
+                episodeTitle = local.episodeTitle ?: target.episodeTitles[episode],
+                episodes = me.enivzoy.anilife.app.data.LocalPlayback.seriesEpisodes(
+                    repository.localEpisodes.value,
+                    anime.id,
+                    anime.title,
+                    anime.episodes,
+                ).let { localNumbers ->
+                    (target.episodes + localNumbers).distinct().sorted()
+                },
+            )
+            return
+        }
         val startedAt = System.nanoTime()
+        val onlineAudio = if (audio.equals(me.enivzoy.anilife.app.data.UPSCALED_AUDIO, ignoreCase = true)) settings.audio else audio
         val rows = animeVideoProviders.episodes(anime.id, anime.episodes, anime.malId)
         val resolved = animeVideoProviders.sources(
             anilistId = anime.id,
             malId = anime.malId,
             titles = listOfNotNull(anime.title, anime.titleRomaji, anime.titleNative) + anime.synonyms,
             episode = episode,
-            dub = audio.equals("Dub", ignoreCase = true),
+            dub = onlineAudio.equals("Dub", ignoreCase = true),
         )
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
         val selected = resolved.firstOrNull()
@@ -415,10 +471,14 @@ fun AniLifeApp(
                 "fallback=$fallback selected=${selected.provider}/${selected.server}"
         }
         if (fallback) logger.warn { "fallback server used for episode=$episode selected=${selected.provider}/${selected.server}" }
-        val current = screen as? Screen.Player ?: return
-        if (current.detail?.id != anime.id) return
-        val label = formatPlayerEpisode(episode)
-        screen = current.copy(
+        val now = screen as? Screen.Player ?: return
+        if (now.detail?.id != anime.id) return
+        val numbers = (rows.map { it.number } + me.enivzoy.anilife.app.data.LocalPlayback.availableEpisodes(
+            repository.localEpisodes.value,
+            anime.id,
+            anime.title,
+        )).distinct().sorted()
+        screen = now.copy(
             title = "${anime.title} · Episode $label · ${selected.provider} ${selected.quality ?: selected.format.uppercase()}",
             url = selected.url,
             headers = selected.headers,
@@ -428,7 +488,7 @@ fun AniLifeApp(
             audioError = null,
             episode = episode,
             episodeTitle = rows.firstOrNull { it.number == episode }?.title,
-            episodes = rows.map { it.number },
+            episodes = numbers,
             episodeTitles = rows.mapNotNull { row -> row.title?.takeIf(String::isNotBlank)?.let { row.number to it } }.toMap(),
             episodeThumbnails = rows.mapNotNull { row -> row.thumbnail?.takeIf(String::isNotBlank)?.let { row.number to it } }.toMap(),
         )
@@ -593,13 +653,24 @@ fun AniLifeApp(
                         onSettingsChange = ::updateSettings,
                         onOpen = { navigateTo(Screen.Detail(it)) },
                         onContinue = { entry ->
-                            scope.launch {
-                                val detail = runCatching { repository.detail(entry.anime.id) }.getOrNull()
-                                if (detail != null) {
-                                    val nextEp = (entry.progress.episode).takeIf { it > 0.0 }
-                                    navigateTo(Screen.Watch(detail, nextEp))
-                                } else {
-                                    navigateTo(Screen.Detail(entry.anime.id))
+                            val local = LocalPlayback.pick(
+                                repository.localEpisodes.value,
+                                entry.anime.id,
+                                entry.anime.title,
+                                entry.progress.episode.toDouble(),
+                                settings.audio.lowercase(),
+                            )
+                            if (local != null) {
+                                navigateTo(localPlayerScreen(entry.anime.toDetail(), local))
+                            } else {
+                                scope.launch {
+                                    val detail = runCatching { repository.detail(entry.anime.id) }.getOrNull()
+                                    if (detail != null) {
+                                        val nextEp = (entry.progress.episode).takeIf { it > 0.0 }
+                                        navigateTo(Screen.Watch(detail, nextEp))
+                                    } else {
+                                        navigateTo(Screen.Detail(entry.anime.id))
+                                    }
                                 }
                             }
                         },
@@ -642,7 +713,15 @@ fun AniLifeApp(
                         repository = repository,
                         settings = settings,
                         onSettingsChange = ::updateSettings,
-                        onPlay = { title, url -> navigateTo(Screen.Player(title, url)) },
+                        onPlay = { title, url ->
+                            val entry = repository.localEpisodes.value
+                                .firstOrNull { LocalPlayback.matchesLocation(it, url) }
+                            if (entry == null) {
+                                navigateTo(Screen.Player(title, url))
+                            } else {
+                                navigateTo(localPlayerScreen(entry.anime.toDetail(), entry))
+                            }
+                        },
                         onOpen = { id -> navigateTo(Screen.Detail(id)) },
                         onBrowse = { navigateTo(Screen.Browse) },
                         queueManager = downloadQueue,
@@ -653,7 +732,34 @@ fun AniLifeApp(
                         id = target.id,
                         onBack = ::goBack,
                         onOpen = { navigateTo(Screen.Detail(it)) },
-                        onWatch = { detail, episode -> navigateTo(Screen.Watch(detail, episode)) },
+                        onWatch = { detail, episode ->
+                            val continueEpisode = ContinueStoreInstance.entries.value
+                                .firstOrNull { it.anime.id == detail.id }
+                                ?.progress?.episode?.toDouble()
+                            val audio = settings.audio.lowercase()
+                            val wanted = episode ?: continueEpisode
+                            val local = when {
+                                wanted != null -> LocalPlayback.find(
+                                    repository.localEpisodes.value,
+                                    detail.id,
+                                    detail.title,
+                                    wanted,
+                                    audio,
+                                )
+                                else -> LocalPlayback.find(
+                                    repository.localEpisodes.value,
+                                    detail.id,
+                                    detail.title,
+                                    1.0,
+                                    audio,
+                                )
+                            }
+                            if (local != null) {
+                                navigateTo(localPlayerScreen(detail, local))
+                            } else {
+                                navigateTo(Screen.Watch(detail, wanted))
+                            }
+                        },
                         queueManager = downloadQueue,
                         settings = settings,
                     )

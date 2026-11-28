@@ -189,6 +189,16 @@ fun NextAiringTag(nextAiring: NextAiring, modifier: Modifier = Modifier) {
     )
 }
 
+@Composable
+fun UpscaledTag(modifier: Modifier = Modifier) {
+    Chip(
+        text = "4K",
+        modifier = modifier,
+        container = AniLifeColors.Gold,
+        content = AniLifeColors.GoldForeground,
+    )
+}
+
  
 fun cardMeta(anime: AnimeCard): String = listOfNotNull(
     formatLabel(anime.format),

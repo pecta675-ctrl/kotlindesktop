@@ -57,6 +57,7 @@ fun AnimeRow(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     loading: Boolean = false,
+    upscaledIds: Set<Long> = emptySet(),
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -121,7 +122,11 @@ fun AnimeRow(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 items(items = items, key = { it.id }) { anime ->
-                    AnimePosterCard(anime = anime, onClick = { onOpen(anime.id) })
+                    AnimePosterCard(
+                        anime = anime,
+                        onClick = { onOpen(anime.id) },
+                        upscaled = anime.id in upscaledIds,
+                    )
                 }
             }
         }

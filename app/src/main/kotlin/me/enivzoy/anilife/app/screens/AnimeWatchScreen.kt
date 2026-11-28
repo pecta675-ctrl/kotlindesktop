@@ -52,6 +52,9 @@ import me.enivzoy.anilife.app.data.AnimeVideoSource
 import me.enivzoy.anilife.app.data.AniListRepository
 import me.enivzoy.anilife.app.data.AniListSync
 import me.enivzoy.anilife.app.data.ContinueStoreInstance
+import me.enivzoy.anilife.app.data.LocalEpisode
+import me.enivzoy.anilife.app.data.LocalPlayback
+import me.enivzoy.anilife.app.data.isUpscaled
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
@@ -87,14 +90,16 @@ fun AnimeWatchScreen(
     var resolveAttempt by remember(anilistId) { mutableStateOf(0) }
     var playWhenResolved by remember(anilistId) { mutableStateOf<Double?>(null) }
     var dub by remember(anilistId) { mutableStateOf(false) }
+    val localEntries by repository.localEpisodes.collectAsState()
+    var onlineOverride by remember(anilistId, selectedEpisode) { mutableStateOf(false) }
 
     LaunchedEffect(anilistId) {
         loading = true
         error = null
         try {
-            episodes = providers.episodes(anilistId, detail.episodes, detail.malId)
-            val missingTitles = episodes.filter { it.title.isNullOrBlank() }.map { it.number }
-            if (missingTitles.isNotEmpty()) {
+            val found = providers.episodes(anilistId, detail.episodes, detail.malId)
+            val missingTitles = found.filter { it.title.isNullOrBlank() }.map { it.number }
+            val withTitles = if (missingTitles.isNotEmpty()) {
                 val metadataTitles = repository.episodeTitles(
                     AnimeCard(
                         id = detail.id,
@@ -106,15 +111,23 @@ fun AnimeWatchScreen(
                     ),
                     missingTitles,
                 )
-                episodes = episodes.map { episode ->
+                found.map { episode ->
                     episode.copy(title = episode.title?.takeIf(String::isNotBlank) ?: metadataTitles[episode.number])
                 }
+            } else {
+                found
             }
+            val localNumbers = LocalPlayback.availableEpisodes(localEntries, anilistId, title)
+            episodes = (withTitles + localNumbers.map { AnimeEpisode(it, null) })
+                .distinctBy { it.number }
+                .sortedBy { it.number }
             if (episodes.isEmpty()) error = "No provider episodes were found for this title."
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
-            error = failure.message ?: "Couldn't load video providers."
+            val localNumbers = LocalPlayback.availableEpisodes(localEntries, anilistId, title)
+            episodes = localNumbers.map { AnimeEpisode(it, null) }
+            error = if (episodes.isEmpty()) failure.message ?: "Couldn't load video providers." else null
         } finally {
             loading = false
         }
@@ -138,8 +151,54 @@ fun AnimeWatchScreen(
         )
     }
 
-    LaunchedEffect(anilistId, activeEpisode, resolveAttempt, episodes.isNotEmpty()) {
+    fun playLocalEntry(entry: LocalEpisode) {
+        val number = episodeNumber(entry.episode)
+        val quality = if (entry.isUpscaled()) "4K · On device" else "Downloaded"
+        val series = LocalPlayback.seriesEpisodes(localEntries, anilistId, title, detail.episodes)
+        val titles = episodes.mapNotNull { item ->
+            item.title?.takeIf(String::isNotBlank)?.let { item.number to it }
+        }.toMap()
+        val thumbnails = episodes.mapNotNull { item ->
+            item.thumbnail?.takeIf(String::isNotBlank)?.let { item.number to it }
+        }.toMap()
+        onPlay(
+            "$title · Episode $number · $quality",
+            entry.path.toUri().toString(),
+            emptyMap(),
+            emptyList(),
+            entry.episode,
+            entry.episodeTitle ?: episodes.firstOrNull { it.number == entry.episode }?.title,
+            series,
+            titles,
+            thumbnails,
+        )
+    }
+
+    val localEntry = remember(localEntries, anilistId, activeEpisode, dub, onlineOverride) {
+        val episode = activeEpisode ?: return@remember null
+        if (onlineOverride) return@remember null
+        LocalPlayback.find(
+            entries = localEntries,
+            animeId = anilistId,
+            title = title,
+            episode = episode,
+            audio = if (dub) "dub" else "sub",
+        )
+    }
+
+    LaunchedEffect(anilistId, activeEpisode, resolveAttempt, episodes.isNotEmpty(), localEntry) {
         if (activeEpisode == null || episodes.isEmpty()) return@LaunchedEffect
+        val local = localEntry
+        if (local != null) {
+            sources = emptyList()
+            error = null
+            resolving = null
+            if (playWhenResolved == activeEpisode) {
+                playWhenResolved = null
+                playLocalEntry(local)
+            }
+            return@LaunchedEffect
+        }
         val startedAt = System.nanoTime()
         try {
             val resolved = providers.sources(
@@ -202,11 +261,19 @@ fun AnimeWatchScreen(
                         Box(Modifier.weight(1f)) {
                             LazyColumn(Modifier.fillMaxSize(), state = episodeListState, verticalArrangement = Arrangement.spacedBy(7.dp)) {
                                 items(episodes, key = { it.number }) { episode ->
+                                    val local = LocalPlayback.find(
+                                        entries = localEntries,
+                                        animeId = anilistId,
+                                        title = title,
+                                        episode = episode.number,
+                                        audio = if (dub) "dub" else "sub",
+                                    )
                                     EpisodeRow(
                                         episode = episode,
                                         selected = selectedEpisode == episode.number,
                                         loading = resolving == episode.number,
                                         progress = episodeWatchProgress(episode.number, watchedEpisodes, continueProgress),
+                                        downloaded = local,
                                         onSelect = {
                                             selectedEpisode = episode.number
                                             playWhenResolved = null
@@ -216,12 +283,17 @@ fun AnimeWatchScreen(
                                             resolveAttempt++
                                         },
                                         onPlay = {
-                                            selectedEpisode = episode.number
-                                            playWhenResolved = episode.number
-                                            sources = emptyList()
-                                            error = null
-                                            resolving = episode.number
-                                            resolveAttempt++
+                                            if (local != null) {
+                                                selectedEpisode = episode.number
+                                                playLocalEntry(local)
+                                            } else {
+                                                selectedEpisode = episode.number
+                                                playWhenResolved = episode.number
+                                                sources = emptyList()
+                                                error = null
+                                                resolving = episode.number
+                                                resolveAttempt++
+                                            }
                                         },
                                     )
                                 }
@@ -273,6 +345,51 @@ fun AnimeWatchScreen(
                 Spacer(Modifier.height(7.dp))
                 when {
                     activeEpisode == null -> EmptyState("Pick an episode to see available servers.")
+                    localEntry != null -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "On your device",
+                                Modifier.clip(CircleShape).background(AniLifeColors.Gold).padding(horizontal = 9.dp, vertical = 4.dp),
+                                color = AniLifeColors.GoldForeground,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            if (localEntry.isUpscaled()) {
+                                Text(
+                                    "4K UPSCALED",
+                                    color = AniLifeColors.Gold,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                        Text(
+                            localEntry.path.fileName?.toString().orEmpty(),
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Button(
+                            onClick = { playLocalEntry(localEntry) },
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Text("Play downloaded", modifier = Modifier.padding(start = 4.dp), fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                onlineOverride = true
+                                sources = emptyList()
+                                error = null
+                                resolving = activeEpisode
+                                resolveAttempt++
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Text("Use an online provider", fontSize = 12.sp)
+                        }
+                    }
                     resolving == activeEpisode && sources.isEmpty() -> LoadingState("Checking servers")
                     sources.isEmpty() -> EmptyState(error ?: "No servers are available for this episode.")
                     else -> {
@@ -355,6 +472,7 @@ private fun EpisodeRow(
     selected: Boolean,
     loading: Boolean,
     progress: EpisodeWatchProgress?,
+    downloaded: LocalEpisode? = null,
     onSelect: () -> Unit,
     onPlay: () -> Unit,
 ) {
@@ -390,6 +508,19 @@ private fun EpisodeRow(
             Text(episode.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Text(episode.title?.takeIf(String::isNotBlank) ?: "Episode ${episodeNumber(episode.number)}", color = Color.White.copy(alpha = 0.52f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             progress?.let { EpisodeProgressBar(it.fraction, Modifier.padding(top = 5.dp)) }
+        }
+        if (downloaded != null) {
+            Text(
+                if (downloaded.isUpscaled()) "4K" else "Downloaded",
+                Modifier
+                    .clip(CircleShape)
+                    .background(if (downloaded.isUpscaled()) AniLifeColors.Gold else AniLifeColors.Primary)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                color = if (downloaded.isUpscaled()) AniLifeColors.GoldForeground else AniLifeColors.PrimaryForeground,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.width(6.dp))
         }
         if (selected) {
             Icon(Icons.Rounded.CheckCircle, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(19.dp))
