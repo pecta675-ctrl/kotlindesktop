@@ -85,6 +85,9 @@ class AniListRepository(
     suspend fun schedule(): List<me.enivzoy.anilife.core.model.AiringEntry> =
         client.schedule(days = 7, since = System.currentTimeMillis() / 1000 - 2 * 86_400L)
 
+    suspend fun schedule(from: Long, until: Long): List<me.enivzoy.anilife.core.model.AiringEntry> =
+        client.scheduleRange(from, until, showAdult = onlyAdult)
+
     /** What has aired in the last [hours], used to announce new episodes of library titles. */
     suspend fun recentlyAired(hours: Int): List<me.enivzoy.anilife.core.model.AiringEntry> =
         client.schedule(days = 1, since = System.currentTimeMillis() / 1000 - hours * 3600L)

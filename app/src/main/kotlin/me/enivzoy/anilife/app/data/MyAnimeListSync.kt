@@ -56,6 +56,8 @@ object MyAnimeListSync {
     private val mutex = Mutex()
     private val mutableUser = MutableStateFlow<MyAnimeListUser?>(null)
     val user = mutableUser.asStateFlow()
+    private val mutableEntries = MutableStateFlow<List<MyAnimeListEntry>>(emptyList())
+    val entries = mutableEntries.asStateFlow()
     private val mutableConfigured = MutableStateFlow(false)
     val configured = mutableConfigured.asStateFlow()
     @Volatile private var clientId: String = DEFAULT_CLIENT_ID
@@ -111,6 +113,7 @@ object MyAnimeListSync {
             val account = userRequest(fresh.accessToken)
             saveTokens(fresh)
             tokens = fresh
+            mutableEntries.value = emptyList()
             mutableUser.value = account
         }
     }
@@ -118,6 +121,7 @@ object MyAnimeListSync {
     suspend fun disconnect() = mutex.withLock {
         tokens = null
         mutableUser.value = null
+        mutableEntries.value = emptyList()
         tokenFile().delete()
     }
 
@@ -133,7 +137,7 @@ object MyAnimeListSync {
                     .header("Authorization", "Bearer $token")
                     .GET().build(),
             )
-        }
+        }.also { mutableEntries.value = it }
     }
 
     /**

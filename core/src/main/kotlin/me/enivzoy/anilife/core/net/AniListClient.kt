@@ -339,6 +339,16 @@ class AniListClient(
     suspend fun schedule(days: Int = 7, showAdult: Boolean = false, since: Long? = null): List<AiringEntry> {
         val from = since ?: (nowSeconds() / HOME_BUCKET_SECONDS) * HOME_BUCKET_SECONDS
         val to = if (since == null) from + days * 86_400L else nowSeconds() + days * 86_400L
+        return scheduleRange(from, to, showAdult, maxAgeSeconds = if (since == null) 900 else 0)
+    }
+
+    suspend fun scheduleRange(
+        from: Long,
+        until: Long,
+        showAdult: Boolean = false,
+        maxAgeSeconds: Long = 900,
+    ): List<AiringEntry> {
+        require(from >= 0 && until > from && until <= Int.MAX_VALUE) { "Invalid airing schedule date range." }
         val query = """
             query (${'$'}page: Int, ${'$'}from: Int, ${'$'}to: Int) {
               Page(page: ${'$'}page, perPage: 50) {
@@ -351,15 +361,17 @@ class AniListClient(
         """.trimIndent()
 
         val entries = mutableListOf<AiringEntry>()
-        for (page in 1..8) {
+        var page = 1
+        while (true) {
+            check(page <= 200) { "AniList returned too many schedule pages. Choose a shorter date range." }
             val data = execute(
                 query,
                 buildJsonObject {
                     put("page", page)
-                    put("from", from)
-                    put("to", to)
+                    put("from", from - 1)
+                    put("to", until)
                 },
-                maxAgeSeconds = if (since == null) 900 else 0,
+                maxAgeSeconds = maxAgeSeconds,
             )
             val pageObj = data["Page"] as? JsonObject ?: break
             pageObj["airingSchedules"].asArray()?.forEach { element ->
@@ -372,6 +384,7 @@ class AniListClient(
             }
             val hasNext = (pageObj["pageInfo"] as? JsonObject)?.bool("hasNextPage") ?: false
             if (!hasNext) break
+            page++
         }
 
         return entries

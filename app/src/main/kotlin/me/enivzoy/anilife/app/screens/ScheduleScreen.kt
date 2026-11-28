@@ -33,6 +33,8 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,16 +57,17 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.enivzoy.anilife.app.data.AniListRepository
+import me.enivzoy.anilife.app.data.AniListSync
+import me.enivzoy.anilife.app.data.AniListConnection
+import me.enivzoy.anilife.app.data.MyAnimeListSync
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.ErrorPanel
 import me.enivzoy.anilife.app.ui.LoadState
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
-import me.enivzoy.anilife.app.ui.Shimmer
 import me.enivzoy.anilife.app.ui.loadState
 import me.enivzoy.anilife.app.ui.parseAnimeColor
 import me.enivzoy.anilife.core.model.AiringEntry
-import me.enivzoy.anilife.core.model.AnimeCard
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -73,6 +76,9 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @Composable
 fun ScheduleScreen(
@@ -81,40 +87,111 @@ fun ScheduleScreen(
 ) {
     var attempt by remember { mutableIntStateOf(0) }
     var state by remember { mutableStateOf<LoadState<List<AiringEntry>>>(LoadState.Loading) }
-    val libraryEntries by repository.library.entries.collectAsState()
+    val zone = remember { ZoneId.systemDefault() }
+    var now by remember { mutableStateOf(Instant.now().epochSecond) }
+    val today = Instant.ofEpochSecond(now).atZone(zone).toLocalDate()
+    var selectedDate by remember(today) { mutableStateOf(today) }
+    var windowAnchor by remember(today) { mutableStateOf(today) }
+    val aniListUser by AniListSync.user.collectAsState()
+    val aniListEntries by AniListSync.entries.collectAsState()
+    val aniListStatus by AniListSync.status.collectAsState()
+    val malUser by MyAnimeListSync.user.collectAsState()
+    val malEntries by MyAnimeListSync.entries.collectAsState()
+    var malLoading by remember { mutableStateOf(false) }
+    var malError by remember { mutableStateOf<String?>(null) }
+    var aniListError by remember { mutableStateOf<String?>(null) }
+    var listAttempt by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(attempt) {
-        state = LoadState.Loading
-        state = loadState { repository.schedule() }
-    }
-
-    when (val current = state) {
-        LoadState.Loading -> ScheduleSkeleton()
-        is LoadState.Failed -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            ErrorPanel(current.message, onRetry = { attempt++ })
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            delay(30_000)
+            now = Instant.now().epochSecond
         }
-        is LoadState.Ready -> ScheduleContent(
-            entries = current.value,
-            library = libraryEntries,
-            onOpen = onOpen,
-        )
     }
+    LaunchedEffect(repository, windowAnchor, zone, attempt) {
+        state = LoadState.Loading
+        val (from, until) = scheduleRangeBounds(windowAnchor, zone)
+        state = loadState { repository.schedule(from, until) }
+    }
+    LaunchedEffect(malUser?.id, listAttempt) {
+        malError = null
+        if (malUser == null) return@LaunchedEffect
+        malLoading = true
+        try {
+            MyAnimeListSync.list()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            malError = "Couldn't refresh MyAnimeList. Results may be incomplete. ${failure.message.orEmpty()}"
+        } finally {
+            malLoading = false
+        }
+    }
+    LaunchedEffect(aniListUser?.id, listAttempt) {
+        aniListError = null
+        if (aniListUser == null || listAttempt == 0) return@LaunchedEffect
+        try {
+            AniListSync.refreshList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            aniListError = "Couldn't refresh AniList. ${failure.message.orEmpty()}"
+        }
+    }
+    val libraryIds = remember(aniListUser, aniListEntries) {
+        if (aniListUser == null) emptySet() else aniListEntries.mapTo(mutableSetOf()) { it.anime.id }
+    }
+    val malIds = remember(malUser, malEntries) {
+        if (malUser == null) emptySet() else malEntries.mapTo(mutableSetOf()) { it.id }
+    }
+    ScheduleContent(
+        entries = (state as? LoadState.Ready)?.value.orEmpty(),
+        libraryIds = libraryIds,
+        malIds = malIds,
+        today = today,
+        selectedDate = selectedDate,
+        windowAnchor = windowAnchor,
+        zone = zone,
+        now = now,
+        loading = state == LoadState.Loading,
+        error = (state as? LoadState.Failed)?.message,
+        onRetry = { attempt++ },
+        listLoading = malLoading || aniListStatus.syncing || aniListStatus.connection == AniListConnection.RESTORING,
+        listMessage = listOfNotNull(malError, aniListError ?: aniListStatus.message).joinToString(" · ").takeIf(String::isNotBlank),
+        accountsConnected = aniListUser != null || malUser != null,
+        onRetryLists = { listAttempt++ },
+        onSelectDate = { date ->
+            selectedDate = date
+            if (date !in scheduleDateWindow(windowAnchor)) windowAnchor = date
+        },
+        onOpen = onOpen,
+    )
 }
 
 @Composable
 private fun ScheduleContent(
     entries: List<AiringEntry>,
-    library: List<AnimeCard>,
+    libraryIds: Set<Long>,
+    malIds: Set<Long>,
+    today: LocalDate,
+    selectedDate: LocalDate,
+    windowAnchor: LocalDate,
+    zone: ZoneId,
+    now: Long,
+    loading: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    listLoading: Boolean,
+    listMessage: String?,
+    accountsConnected: Boolean,
+    onRetryLists: () -> Unit,
+    onSelectDate: (LocalDate) -> Unit,
     onOpen: (Long) -> Unit,
 ) {
-    val zone = remember { ZoneId.systemDefault() }
-    val today = remember(zone) { LocalDate.now(zone) }
-    var selectedDate by remember(today) { mutableStateOf(today) }
-    var onlyMyList by remember { mutableStateOf(false) }
+    var onlyMyList by remember { mutableStateOf(true) }
     var formatFilters by remember { mutableStateOf(emptySet<String>()) }
-    val libraryIds = remember(library) { library.mapTo(mutableSetOf()) { it.id } }
-    val visibleEntries = remember(entries, zone, formatFilters, onlyMyList, libraryIds) {
-        filterScheduleEntries(entries, formatFilters, libraryIds, onlyMyList)
+    val visibleEntries = remember(entries, formatFilters, onlyMyList, libraryIds, malIds) {
+        filterScheduleEntries(entries, formatFilters, libraryIds, onlyMyList, malIds)
     }
     val selectedEntries = remember(visibleEntries, selectedDate, zone) {
         visibleEntries.filter { airingDate(it, zone) == selectedDate }.sortedBy { it.airingAt }
@@ -122,7 +199,9 @@ private fun ScheduleContent(
     val dayCounts = remember(visibleEntries, zone) {
         visibleEntries.groupingBy { airingDate(it, zone) }.eachCount()
     }
-    val now = System.currentTimeMillis() / 1000
+    val matchedLibraryIds = remember(entries, libraryIds, malIds) {
+        filterScheduleEntries(entries, emptySet(), libraryIds, true, malIds).mapTo(mutableSetOf()) { it.anime.id }
+    }
 
     BoxWithConstraints(
         Modifier.fillMaxSize()
@@ -141,12 +220,30 @@ private fun ScheduleContent(
                 Spacer(Modifier.weight(1f))
                 MyListButton(selected = onlyMyList, onClick = { onlyMyList = !onlyMyList })
             }
+            Text(
+                when {
+                    onlyMyList && listLoading -> "Loading your AniList / MyAnimeList lists…"
+                    onlyMyList && !accountsConnected -> "Connect AniList or MyAnimeList in Profile to see your list, or turn off My AniList / MAL to browse all."
+                    onlyMyList -> "Only anime in your AniList or MyAnimeList lists · confirmed AniList times"
+                    else -> "Confirmed AniList airings · local time · select a future date to load its schedule"
+                },
+                color = AniLifeColors.MutedForeground,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            if (listMessage != null && onlyMyList) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(listMessage, color = AniLifeColors.Warning, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onRetryLists) { Text("Retry lists", fontSize = 11.sp) }
+                }
+            }
 
             ScheduleDayStrip(
                 today = today,
+                anchor = windowAnchor,
                 selected = selectedDate,
                 counts = dayCounts,
-                onSelect = { selectedDate = it },
+                onSelect = onSelectDate,
                 modifier = Modifier.padding(top = 14.dp),
             )
 
@@ -159,19 +256,23 @@ private fun ScheduleContent(
                     today = today,
                     entries = selectedEntries,
                     now = now,
+                    loading = loading || (onlyMyList && listLoading),
+                    error = error,
+                    onRetry = onRetry,
+                    onlyMyList = onlyMyList,
                     onOpen = onOpen,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
                 ScheduleSidebar(
                     entries = visibleEntries,
-                    libraryIds = libraryIds,
+                    libraryIds = matchedLibraryIds,
                     counts = dayCounts,
                     selectedDate = selectedDate,
                     month = YearMonth.from(selectedDate),
                     now = now,
                     formatFilters = formatFilters,
                     sidebarWidth = sidebarWidth,
-                    onSelectDate = { selectedDate = it },
+                    onSelectDate = onSelectDate,
                     onToggleFormat = { format ->
                         formatFilters = if (format in formatFilters) formatFilters - format else formatFilters + format
                     },
@@ -202,7 +303,7 @@ private fun MyListButton(selected: Boolean, onClick: () -> Unit) {
             modifier = Modifier.size(16.dp),
         )
         Text(
-            "My list",
+            "My AniList / MAL",
             color = if (selected) AniLifeColors.PrimaryForeground else AniLifeColors.Foreground,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -213,13 +314,14 @@ private fun MyListButton(selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun ScheduleDayStrip(
     today: LocalDate,
+    anchor: LocalDate,
     selected: LocalDate,
     counts: Map<LocalDate, Int>,
     onSelect: (LocalDate) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-        scheduleDateWindow(today).forEach { date ->
+        scheduleDateWindow(anchor).forEach { date ->
             val isSelected = date == selected
             val shape = RoundedCornerShape(13.dp)
             Column(
@@ -263,6 +365,10 @@ private fun ScheduleTimeline(
     today: LocalDate,
     entries: List<AiringEntry>,
     now: Long,
+    loading: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    onlyMyList: Boolean,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -298,14 +404,23 @@ private fun ScheduleTimeline(
                     )
                 }
             }
-            if (groups.isEmpty()) {
+            if (loading) {
+                item(key = "schedule-loading") {
+                    Box(Modifier.fillMaxWidth().padding(top = 60.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = AniLifeColors.Primary, modifier = Modifier.size(28.dp))
+                    }
+                }
+            } else if (error != null) {
+                item(key = "schedule-error") { ErrorPanel(error, onRetry = onRetry) }
+            } else if (groups.isEmpty()) {
                 item(key = "schedule-empty") {
                     Box(
                         Modifier.fillMaxWidth().padding(top = 70.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "Nothing scheduled for ${dateLabel(date, today).lowercase()}",
+                            if (onlyMyList) "No confirmed airings from your lists on this date."
+                            else "AniList has no confirmed airings for this date yet.",
                             color = AniLifeColors.MutedForeground,
                             fontSize = 14.sp,
                         )
@@ -553,7 +668,7 @@ private fun UpcomingCard(entry: AiringEntry, now: Long, onOpen: (Long) -> Unit) 
 @Composable
 private fun FromLibraryCard(entries: List<AiringEntry>, onOpen: (Long) -> Unit) {
     SchedulePanel {
-        Text("From your list this week", color = AniLifeColors.Foreground, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text("From your lists in this window", color = AniLifeColors.Foreground, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         if (entries.isEmpty()) {
             Text(
                 "No upcoming episodes from your list.",
@@ -633,6 +748,11 @@ private fun CalendarCard(
                 Icon(Icons.Rounded.ChevronRight, "Next month", tint = AniLifeColors.MutedForeground, modifier = Modifier.size(17.dp))
             }
         }
+        Text(
+            "Select any date to load its confirmed airings.",
+            color = AniLifeColors.MutedForeground,
+            fontSize = 10.sp,
+        )
         Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp)) {
             listOf("S", "M", "T", "W", "T", "F", "S").forEach { day ->
                 Text(
@@ -739,39 +859,23 @@ private fun SchedulePanel(content: @Composable () -> Unit) {
     )
 }
 
-@Composable
-private fun ScheduleSkeleton() {
-    Column(
-        Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        Shimmer(Modifier.width(180.dp).height(30.dp), RoundedCornerShape(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            repeat(9) {
-                Shimmer(Modifier.weight(1f).height(68.dp), RoundedCornerShape(12.dp))
-            }
-        }
-        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                repeat(6) {
-                    Shimmer(Modifier.fillMaxWidth().height(112.dp), RoundedCornerShape(13.dp))
-                }
-            }
-            Shimmer(Modifier.width(300.dp).fillMaxHeight(), RoundedCornerShape(16.dp))
-        }
-    }
-}
-
 internal fun scheduleDateWindow(today: LocalDate): List<LocalDate> =
     (-2L..6L).map(today::plusDays)
+
+internal fun scheduleRangeBounds(anchor: LocalDate, zone: ZoneId): Pair<Long, Long> {
+    val dates = scheduleDateWindow(anchor)
+    return dates.first().atStartOfDay(zone).toEpochSecond() to
+        dates.last().plusDays(1).atStartOfDay(zone).toEpochSecond()
+}
 
 internal fun filterScheduleEntries(
     entries: List<AiringEntry>,
     formatFilters: Set<String>,
     libraryIds: Set<Long>,
     onlyMyList: Boolean,
+    malIds: Set<Long> = emptySet(),
 ): List<AiringEntry> = entries.filter { entry ->
-    (!onlyMyList || entry.anime.id in libraryIds) &&
+    (!onlyMyList || entry.anime.id in libraryIds || entry.anime.malId in malIds) &&
         (formatFilters.isEmpty() || formatLabel(entry.anime.format) in formatFilters)
 }
 
