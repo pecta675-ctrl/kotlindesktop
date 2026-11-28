@@ -227,69 +227,108 @@ class AnimeUpscaler(private val allowHardwareEncoding: Boolean = true) {
                 lastLog = System.nanoTime()
             }
         }
-        report(UpscaleStage.Preparing, 0.01f, "Selecting fast encoder · $sourceLabel")
-        val encoder = fastEncoder(ffmpeg, source)
+        report(UpscaleStage.Preparing, 0.01f, "Checking available NVIDIA / AMD / Intel encoders · $sourceLabel")
+        val encoders = if (allowHardwareEncoding) fastEncoders(ffmpeg) else listOf(softwareUpscaleEncoder)
         val output = outputPath(input, fast = true)
-        upscaleLogger.info { "fast 4K source=${input.fileName} encoder=${encoder.name} output=${output.fileName}" }
-        try {
-            val detail = "Fast 4K · ${encoder.name} · $sourceLabel · resizing + light sharpening (not AI)"
-            started = System.nanoTime()
-            report(UpscaleStage.Encoding, 0.05f, detail)
-            run(
-                listOf(
-                    ffmpeg, "-v", "error", "-y", "-progress", "pipe:1", "-nostats", "-i", input.toString(),
-                    "-map", "0:v:0", "-map", "0:a?",
-                    "-vf", "scale=-2:$TARGET_HEIGHT:flags=lanczos,unsharp=5:5:0.35:3:3:0",
-                    "-pix_fmt", encoder.pixelFormat,
-                ) + encoder.arguments + listOf("-c:a", "copy", output.toAbsolutePath().toString()),
-                onLine = { line ->
-                    if (line.startsWith("frame=")) line.substringAfter('=').trim().toLongOrNull()?.let(frames::set)
-                    if (line.startsWith("out_time_us=")) line.substringAfter('=').trim().toLongOrNull()?.let(timeMicros::set)
-                },
-            ) { idle ->
-                val fraction = (timeMicros.get() / (source.duration * 1_000_000)).coerceIn(0.0, 1.0)
-                report(UpscaleStage.Encoding, (0.05 + 0.94 * fraction).toFloat(), detail, idle)
-            }
-            checkActive()
-            report(UpscaleStage.Encoding, 0.99f, "Verifying 2160p output")
-            val result = probe(ffprobe, output)
-            require(result.height == TARGET_HEIGHT && Files.size(output) > 0) { "Fast 4K didn't produce a valid 2160p video." }
-            report(UpscaleStage.Completed, 1f, "Fast 4K copy saved · original kept")
-            return output
-        } catch (failure: Throwable) {
-            Files.deleteIfExists(output)
-            if (failure is CancellationException) upscaleLogger.info { "fast 4K cancelled frames=${frames.get()}/$total" }
-            else upscaleLogger.error(failure) { "fast 4K failed frames=${frames.get()}/$total" }
-            throw failure
-        }
-    }
-
-    private suspend fun fastEncoder(ffmpeg: String, source: Source): FastEncoder {
-        if (isWindows && allowHardwareEncoding) {
-            val qsv = FastEncoder("Intel QSV", listOf("-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "22"), "nv12")
-            val width = ((source.width.toDouble() * TARGET_HEIGHT / source.height) / 2).roundToInt() * 2
-            try {
-                val available = withTimeoutOrNull(15_000) {
+        return withUpscaleEncoderFallback(
+            candidates = encoders,
+            probe = { encoder ->
+                report(UpscaleStage.Preparing, 0.02f, "Testing ${encoder.name} at 2160p · $sourceLabel")
+                testEncoder(ffmpeg, ffprobe, source, encoder)
+            },
+            encode = { encoder ->
+                frames.set(0)
+                timeMicros.set(0)
+                started = System.nanoTime()
+                upscaleLogger.info { "fast 4K source=${input.fileName} encoder=${encoder.name} output=${output.fileName}" }
+                try {
+                    val detail = "Fast 4K · ${encoder.name} · $sourceLabel · resizing + light sharpening (not AI)"
+                    report(UpscaleStage.Encoding, 0.05f, detail)
                     run(
-                        listOf(
-                            ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=size=${width}x$TARGET_HEIGHT:rate=1:duration=1",
-                            "-frames:v", "1", "-pix_fmt", qsv.pixelFormat,
-                        ) + qsv.arguments + listOf("-f", "null", "-"),
-                    )
-                    true
-                } ?: false
-                if (available) return qsv
-                upscaleLogger.warn { "fast 4K Intel QSV check timed out; using software encoder" }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                upscaleLogger.warn { "fast 4K Intel QSV unavailable; using software encoder: ${failure.message}" }
-            }
-        }
-        return FastEncoder("Software (veryfast)", listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "20"), "yuv420p")
+                        listOf(ffmpeg, "-v", "error", "-y", "-progress", "pipe:1", "-nostats") + encoder.inputArguments + listOf(
+                            "-i", input.toString(), "-map", "0:v:0", "-map", "0:a?",
+                            "-vf", encoder.filter, "-pix_fmt", encoder.pixelFormat,
+                        ) + encoder.arguments + listOf("-c:a", "copy", output.toAbsolutePath().toString()),
+                        onLine = { line ->
+                            if (line.startsWith("frame=")) line.substringAfter('=').trim().toLongOrNull()?.let(frames::set)
+                            if (line.startsWith("out_time_us=")) line.substringAfter('=').trim().toLongOrNull()?.let(timeMicros::set)
+                        },
+                    ) { idle ->
+                        val fraction = (timeMicros.get() / (source.duration * 1_000_000)).coerceIn(0.0, 1.0)
+                        report(UpscaleStage.Encoding, (0.05 + 0.94 * fraction).toFloat(), detail, idle)
+                    }
+                    checkActive()
+                    report(UpscaleStage.Encoding, 0.99f, "Verifying 2160p output · ${encoder.name}")
+                    val result = probe(ffprobe, output)
+                    require(result.height == TARGET_HEIGHT && Files.size(output) > 0) { "Fast 4K didn't produce a valid 2160p video." }
+                    report(UpscaleStage.Completed, 1f, "Fast 4K copy saved · ${encoder.name} · original kept")
+                    output
+                } catch (failure: Throwable) {
+                    Files.deleteIfExists(output)
+                    if (failure is CancellationException) upscaleLogger.info { "fast 4K cancelled frames=${frames.get()}/$total" }
+                    else upscaleLogger.warn(failure) { "fast 4K attempt failed encoder=${encoder.name} frames=${frames.get()}/$total" }
+                    throw failure
+                }
+            },
+            onUnavailable = { encoder, failure ->
+                upscaleLogger.warn { "fast 4K ${encoder.name} unavailable; trying next encoder: ${failure?.message ?: "2160p test failed or timed out"}" }
+                val restarting = lastStage == UpscaleStage.Encoding
+                if (restarting) {
+                    lastFraction = 0f
+                    frames.set(0)
+                    timeMicros.set(0)
+                }
+                report(
+                    UpscaleStage.Preparing,
+                    if (restarting) 0.01f else lastFraction,
+                    if (restarting) "${encoder.name} failed; restarting with another encoder"
+                    else "${encoder.name} unavailable; trying another encoder",
+                )
+            },
+        )
     }
 
-    private data class FastEncoder(val name: String, val arguments: List<String>, val pixelFormat: String)
+    private suspend fun fastEncoders(ffmpeg: String): List<UpscaleEncoder> {
+        val devices = try {
+            if (System.getProperty("os.name").startsWith("Linux", true) && Files.isDirectory(Path.of("/dev/dri"))) {
+                Files.list(Path.of("/dev/dri")).use { paths ->
+                    paths.filter { it.fileName.toString().matches(Regex("renderD\\d+")) }.map(Path::toString).toList()
+                }
+            } else emptyList()
+        } catch (failure: Exception) {
+            upscaleLogger.warn { "Couldn't enumerate VA-API devices: ${failure.message}" }
+            emptyList()
+        }
+        val candidates = upscaleEncoderCandidates(System.getProperty("os.name"), devices)
+        val advertised = try {
+            withTimeoutOrNull(10_000) { advertisedVideoEncoders(capture(listOf(ffmpeg, "-hide_banner", "-encoders"))) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            upscaleLogger.warn { "Couldn't list FFmpeg encoders; checking candidates individually: ${failure.message}" }
+            null
+        }
+        return candidates.filter { !it.hardware || advertised == null || it.codec in advertised }
+    }
+
+    private suspend fun testEncoder(ffmpeg: String, ffprobe: String, source: Source, encoder: UpscaleEncoder): Boolean {
+        val output = Files.createTempFile("anilife-encoder-check-", ".mkv")
+        val width = ((source.width.toDouble() * TARGET_HEIGHT / source.height) / 2).roundToInt() * 2
+        return try {
+            withTimeoutOrNull(15_000) {
+                run(
+                    listOf(ffmpeg, "-v", "error", "-y") + encoder.inputArguments + listOf(
+                        "-f", "lavfi", "-i", "color=size=${width}x$TARGET_HEIGHT:rate=${source.rate}:duration=1",
+                        "-frames:v", "2", "-vf", encoder.filter, "-pix_fmt", encoder.pixelFormat,
+                    ) + encoder.arguments + listOf(output.toString()),
+                )
+                val result = probe(ffprobe, output)
+                result.height == TARGET_HEIGHT && result.width == width && Files.size(output) > 0
+            } ?: false
+        } finally {
+            Files.deleteIfExists(output)
+        }
+    }
 
     private suspend fun findUpscaler(onProgress: (Float) -> Unit, scale: Int): String {
         val configured = System.getProperty("AniLife.upscaler.dir")?.takeIf(String::isNotBlank)?.let { Path.of(it) }

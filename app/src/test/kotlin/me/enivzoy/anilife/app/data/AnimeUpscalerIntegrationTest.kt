@@ -111,6 +111,7 @@ class AnimeUpscalerIntegrationTest {
         assertEquals(stages, updates.map { it.stage }.toSet())
         assertTrue(updates.last().completedFrames > 0)
         if (mode == UpscaleMode.Fast4K) {
+            println("Fast 4K encoder checks: ${updates.filter { it.stage == UpscaleStage.Preparing }.map { it.detail }.distinct()}")
             println("Fast 4K backend: ${updates.firstOrNull { it.stage == UpscaleStage.Encoding }?.detail}")
             println("Fast 4K measured speed: ${updates.last().framesPerSecond} frames/s; ${updates.last().completedFrames} frames")
         }

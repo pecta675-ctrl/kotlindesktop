@@ -5,8 +5,8 @@ import java.math.MathContext
 import java.math.RoundingMode
 
 enum class UpscaleMode(val label: String, val description: String, val audioTag: String) {
-    Fast4K("Fast 4K", "Lanczos resizing + light sharpening. Much faster; no AI detail reconstruction.", "4k-fast"),
-    AIQuality("AI Quality", "Real-ESRGAN animation enhancement. Can take hours or days on integrated graphics.", UPSCALED_AUDIO),
+    Fast4K("Fast 4K", "Resizing + light sharpening, not AI. Auto NVIDIA / AMD / Intel encoding, with software fallback.", "4k-fast"),
+    AIQuality("AI Quality", "Real-ESRGAN via Vulkan on compatible NVIDIA / AMD / Intel GPUs. Slow on integrated graphics.", UPSCALED_AUDIO),
 }
 
 enum class UpscaleStage(val label: String) {
