@@ -2,6 +2,7 @@ package me.enivzoy.anilife.app.data
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -12,21 +13,48 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.Comparator
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
+import io.github.oshai.kotlinlogging.KotlinLogging
 
 private const val MODEL = "realesr-animevideov3"
 private const val TARGET_HEIGHT = 2160
 private const val CHUNK_SECONDS = 60.0
+private val upscaleLogger = KotlinLogging.logger {}
 private const val LINUX_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
 private const val MAC_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip"
 
 class AnimeUpscaler {
-    suspend fun upscale(episode: LocalEpisode, onProgress: (Float) -> Unit): Path =
+    suspend fun upscale(episode: LocalEpisode, onProgress: (UpscaleProgress) -> Unit): Path =
         withContext(Dispatchers.IO) {
+            var lastFraction = 0f
+            var lastStage: UpscaleStage? = null
+            var lastLog = 0L
+            var completedFrames = 0L
+            var totalFrames = 0L
+            var speed: Double? = null
+            fun report(stage: UpscaleStage, fraction: Float, detail: String, idle: Long = 0) {
+                lastFraction = maxOf(lastFraction, fraction.coerceIn(0f, 1f))
+                val update = UpscaleProgress(lastFraction, stage, detail, completedFrames, totalFrames, speed, idle)
+                onProgress(update)
+                val now = System.nanoTime()
+                if (stage != lastStage || now - lastLog >= TimeUnit.SECONDS.toNanos(30)) {
+                    upscaleLogger.info {
+                        "upscale ${formatUpscalePercent(lastFraction)} stage=${stage.label} " +
+                            "frames=$completedFrames/$totalFrames fps=$speed idleSeconds=$idle $detail"
+                    }
+                    lastLog = now
+                    lastStage = stage
+                }
+            }
+            report(UpscaleStage.Preparing, 0f, "Reading source video")
             val input = episode.path
             require(Files.isRegularFile(input)) { "Episode file not found: ${input}" }
             val ffmpeg = findTool("ffmpeg")
@@ -36,63 +64,100 @@ class AnimeUpscaler {
             val source = probe(ffprobe, input)
             require(source.duration > 0) { "Couldn't read the episode duration." }
             val scale = (TARGET_HEIGHT.toDouble() / source.height).roundToInt().coerceIn(2, 4)
-            val upscaler = findUpscaler(onProgress, scale)
-            val report = { fraction: Float -> onProgress((0.05f + 0.95f * fraction).coerceIn(0f, 1f)) }
+            totalFrames = (source.duration * source.rate).roundToLong()
+            val sourceLabel = "${source.width}×${source.height} → 2160p"
+            upscaleLogger.info { "upscale source=${input.fileName} $sourceLabel rate=${source.rate} duration=${source.duration} model=$MODEL-x$scale" }
+            val upscaler = findUpscaler({ report(UpscaleStage.Preparing, it, "Preparing AI model · $sourceLabel") }, scale)
             val chunkFrames = (CHUNK_SECONDS * source.rate).roundToInt().coerceAtLeast(1)
             val chunks = ceil(source.duration * source.rate / chunkFrames).toInt().coerceAtLeast(1)
             val temporary = Files.createTempDirectory("anilife-upscale-")
+            upscaleLogger.info { "upscale workspace=$temporary chunks=$chunks" }
             try {
                 val parts = mutableListOf<Path>()
-                report(0.02f)
+                var inferenceNanos = 0L
                 repeat(chunks) { index ->
                     checkActive()
-                    val part = temporary.resolve("part%05d.mkv".format(index))
-                    val chunk = Files.createDirectory(temporary.resolve("chunk%05d".format(index)))
+                    val part = temporary.resolve("part%05d.mkv".format(Locale.ROOT, index))
+                    val chunk = Files.createDirectory(temporary.resolve("chunk%05d".format(Locale.ROOT, index)))
                     try {
                         val frames = Files.createDirectory(chunk.resolve("frames"))
                         val upscaled = Files.createDirectory(chunk.resolve("upscaled"))
                         val start = index.toDouble() * chunkFrames / source.rate
+                        val chunkLabel = "Part ${index + 1}/$chunks · $sourceLabel"
+                        val extractedFrames = AtomicLong()
+                        report(UpscaleStage.Extracting, upscaleChunkProgress(index, chunks, 0.0, 0.0, 0.0), chunkLabel)
                         run(
                             listOf(
-                                ffmpeg, "-v", "error", "-y",
-                                "-ss", "%.3f".format(start), "-i", input.toString(),
+                                ffmpeg, "-v", "error", "-y", "-progress", "pipe:1", "-nostats",
+                                "-ss", "%.3f".format(Locale.ROOT, start), "-i", input.toString(),
                                 "-frames:v", chunkFrames.toString(),
                                 "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
                                 frames.resolve("frame%08d.png").toString(),
                             ),
-                        )
+                            onLine = { line -> line.removePrefix("frame=").trim().toLongOrNull()?.let(extractedFrames::set) },
+                        ) { idle ->
+                            report(
+                                UpscaleStage.Extracting,
+                                upscaleChunkProgress(index, chunks, extractedFrames.get().toDouble() / chunkFrames, 0.0, 0.0),
+                                chunkLabel,
+                                idle,
+                            )
+                        }
                         checkActive()
                         val total = countFrames(frames)
                         require(total > 0) { "ffmpeg didn't extract any frames." }
+                        val previousFrames = completedFrames
+                        val inferenceStarted = System.nanoTime()
+                        report(UpscaleStage.Upscaling, upscaleChunkProgress(index, chunks, 1.0, 0.0, 0.0), chunkLabel)
                         run(
                             listOf(
                                 upscaler, "-i", frames.toString(), "-o", upscaled.toString(),
                                 "-n", MODEL, "-s", scale.toString(), "-f", "png",
                             ),
                             workingDirectory = File(upscaler).absoluteFile.parentFile,
-                        ) {
-                            val done = countFrames(upscaled)
-                            report((index + done.toFloat() / total) / chunks)
-                            delay(300)
+                        ) { idle ->
+                            val done = countFrames(upscaled).coerceAtMost(total)
+                            completedFrames = previousFrames + done
+                            val elapsed = (inferenceNanos + System.nanoTime() - inferenceStarted) / 1_000_000_000.0
+                            speed = if (completedFrames > 0 && elapsed > 0) completedFrames / elapsed else null
+                            report(
+                                UpscaleStage.Upscaling,
+                                upscaleChunkProgress(index, chunks, 1.0, done.toDouble() / total, 0.0),
+                                "$chunkLabel · $done/$total frames in this part",
+                                idle,
+                            )
                         }
+                        inferenceNanos += System.nanoTime() - inferenceStarted
                         checkActive()
                         val written = countFrames(upscaled)
                         require(written == total) { "Upscaled $written of $total frames in part ${index + 1}." }
+                        completedFrames = previousFrames + written
+                        val encodedFrames = AtomicLong()
+                        report(UpscaleStage.Encoding, upscaleChunkProgress(index, chunks, 1.0, 1.0, 0.0), chunkLabel)
                         run(
                             listOf(
-                                ffmpeg, "-v", "error", "-y", "-framerate", source.rate.toString(),
+                                ffmpeg, "-v", "error", "-y", "-progress", "pipe:1", "-nostats", "-framerate", source.rate.toString(),
                                 "-i", upscaled.resolve("frame%08d.png").toString(),
+                                "-vf", "scale=-2:$TARGET_HEIGHT:flags=lanczos",
                                 "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
                                 part.toString(),
                             ),
-                        )
+                            onLine = { line -> line.removePrefix("frame=").trim().toLongOrNull()?.let(encodedFrames::set) },
+                        ) { idle ->
+                            report(
+                                UpscaleStage.Encoding,
+                                upscaleChunkProgress(index, chunks, 1.0, 1.0, encodedFrames.get().toDouble() / total),
+                                chunkLabel,
+                                idle,
+                            )
+                        }
                         parts.add(part)
                     } finally {
                         deleteRecursively(chunk)
                     }
                 }
                 checkActive()
-                report(0.95f)
+                report(UpscaleStage.Joining, 0.98f, "Joining $chunks video parts")
                 val output = outputPath(input)
                 val video = temporary.resolve("video.mkv")
                 val listing = temporary.resolve("parts.txt")
@@ -100,7 +165,8 @@ class AnimeUpscaler {
                 run(
                     listOf(ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", listing.fileName.toString(), "-c", "copy", video.fileName.toString()),
                     workingDirectory = temporary.toFile(),
-                )
+                ) { idle -> report(UpscaleStage.Joining, 0.98f, "Joining $chunks video parts", idle) }
+                report(UpscaleStage.Audio, 0.99f, "Copying original audio into the 4K video")
                 run(
                     listOf(
                         ffmpeg, "-v", "error", "-y",
@@ -108,10 +174,19 @@ class AnimeUpscaler {
                         "-map", "0:v:0", "-map", "1:a?", "-c", "copy", output.toAbsolutePath().toString(),
                     ),
                     workingDirectory = temporary.toFile(),
-                )
+                ) { idle -> report(UpscaleStage.Audio, 0.99f, "Copying original audio into the 4K video", idle) }
                 checkActive()
-                report(1f)
+                val result = probe(ffprobe, output)
+                require(result.height == TARGET_HEIGHT && Files.size(output) > 0) { "The upscaler didn't produce a valid 2160p video." }
+                totalFrames = completedFrames
+                report(UpscaleStage.Completed, 1f, "4K video saved")
                 output
+            } catch (cancelled: CancellationException) {
+                upscaleLogger.info { "upscale cancelled stage=$lastStage frames=$completedFrames/$totalFrames" }
+                throw cancelled
+            } catch (failure: Throwable) {
+                upscaleLogger.error(failure) { "upscale failed stage=$lastStage frames=$completedFrames/$totalFrames" }
+                throw failure
             } finally {
                 deleteRecursively(temporary)
             }
@@ -201,58 +276,72 @@ class AnimeUpscaler {
         val output = capture(
             listOf(
                 ffprobe, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate,height:format=duration",
-                "-of", "default=nw=1:nk=1", input.toString(),
+                "-show_entries", "stream=r_frame_rate,avg_frame_rate,width,height:format=duration",
+                "-of", "default=nw=1", input.toString(),
             ),
         )
-        val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-        val rate = lines.firstOrNull { '/' in it }?.let(::parseRate) ?: 24.0
-        val height = lines.mapNotNull(String::toIntOrNull).firstOrNull() ?: 1080
-        return Source(rate, height, lines.lastOrNull()?.toDoubleOrNull() ?: 0.0)
+        val fields = output.lineSequence().filter { '=' in it }.associate { line ->
+            line.substringBefore('=').trim() to line.substringAfter('=').trim()
+        }
+        val rate = fields["avg_frame_rate"]?.let(::parseRate) ?: fields["r_frame_rate"]?.let(::parseRate)
+            ?: error("Couldn't read the video frame rate.")
+        val width = fields["width"]?.toIntOrNull()?.takeIf { it > 0 } ?: error("Couldn't read the video width.")
+        val height = fields["height"]?.toIntOrNull()?.takeIf { it > 0 } ?: error("Couldn't read the video height.")
+        return Source(rate, width, height, fields["duration"]?.toDoubleOrNull()?.takeIf { it.isFinite() } ?: 0.0)
     }
 
     private suspend fun run(
         command: List<String>,
         workingDirectory: File? = null,
-        tick: (suspend () -> Unit)? = null,
+        onLine: (String) -> Unit = {},
+        tick: (suspend (Long) -> Unit)? = null,
     ) {
         checkActive()
         val processBuilder = ProcessBuilder(command).redirectErrorStream(true)
         workingDirectory?.let(processBuilder::directory)
         val process = processBuilder.start()
         val log = StringBuilder()
+        val lastOutput = AtomicLong(System.nanoTime())
+        upscaleLogger.info { "upscale process started tool=${File(command.first()).name} pid=${process.pid()}" }
         val drain = Thread {
             process.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { line -> synchronized(log) { log.append(line).append('\n') } }
+                lines.forEach { line ->
+                    lastOutput.set(System.nanoTime())
+                    onLine(line)
+                    if (line.startsWith('[') && !line.contains("%")) upscaleLogger.info { "upscale device $line" }
+                    synchronized(log) {
+                        log.append(line.takeLast(8_192)).append('\n')
+                        if (log.length > 32_768) log.delete(0, log.length - 16_384)
+                    }
+                }
             }
         }.apply { isDaemon = true; start() }
         try {
             while (process.isAlive) {
                 checkActive()
-                tick?.invoke()
+                tick?.invoke(TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - lastOutput.get()))
                 delay(300)
             }
             val exit = process.waitFor()
             drain.join(2_000)
             checkActive()
             require(exit == 0) { "${File(command.first()).name} exited with code $exit: ${reason(log)}" }
+            upscaleLogger.info { "upscale process finished tool=${File(command.first()).name} pid=${process.pid()} exit=$exit" }
         } finally {
-            if (process.isAlive) process.destroyForcibly()
+            withContext(NonCancellable + Dispatchers.IO) {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    check(process.waitFor(10, TimeUnit.SECONDS)) { "Couldn't stop upscale process ${process.pid()}." }
+                }
+                drain.join(2_000)
+            }
         }
     }
 
     private suspend fun capture(command: List<String>): String {
-        checkActive()
-        val process = ProcessBuilder(command).redirectErrorStream(true).start()
-        return try {
-            val output = process.inputStream.use { it.readBytes() }.toString(Charsets.UTF_8)
-            val exit = process.waitFor()
-            checkActive()
-            require(exit == 0) { "${File(command.first()).name} exited with code $exit: ${output.trim().lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()}" }
-            output
-        } finally {
-            if (process.isAlive) process.destroyForcibly()
-        }
+        val output = StringBuilder()
+        run(command, onLine = { line -> output.append(line).append('\n') })
+        return output.toString()
     }
 
     private fun reason(log: StringBuilder): String =
@@ -306,7 +395,7 @@ class AnimeUpscaler {
         }
     }
 
-    private data class Source(val rate: Double, val height: Int, val duration: Double)
+    private data class Source(val rate: Double, val width: Int, val height: Int, val duration: Double)
 
     private companion object {
         const val UPSCALER = "realesrgan-ncnn-vulkan"

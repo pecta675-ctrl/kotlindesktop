@@ -150,6 +150,7 @@ fun DownloadsScreen(
     onOpen: (Long) -> Unit = {},
     onBrowse: () -> Unit = {},
     queueManager: DownloadQueueManager,
+    upscaleQueue: UpscaleQueueManager,
 ) {
     val episodes by repository.localEpisodes.collectAsState()
     val continueEntries by ContinueStoreInstance.entries.collectAsState()
@@ -169,7 +170,6 @@ fun DownloadsScreen(
     val downloadJobs by queueManager.jobs.collectAsState()
     var topTab by remember { mutableIntStateOf(0) }
     var showUpscaleDialog by remember { mutableStateOf(false) }
-    val upscaleQueue = remember(repository) { UpscaleQueueManager(repository, scope) }
     val upscaleJobs by upscaleQueue.jobs.collectAsState()
 
     fun selectMediaFolder(): Path? {

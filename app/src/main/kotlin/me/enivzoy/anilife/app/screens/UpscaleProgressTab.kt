@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.enivzoy.anilife.app.data.UpscaleJob
 import me.enivzoy.anilife.app.data.UpscaleStatus
+import me.enivzoy.anilife.app.data.formatUpscalePercent
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 
@@ -120,10 +121,30 @@ private fun UpscaleJobCard(
                     trackColor = AniLifeColors.Border,
                 )
                 Text(
-                    "${(job.progress * 100).toInt()}%",
+                    "${formatUpscalePercent(job.progress)} · ${job.activity.stage.label}",
                     color = AniLifeColors.MutedForeground,
                     fontSize = 11.sp,
                 )
+                Text(
+                    job.activity.detail,
+                    color = AniLifeColors.MutedForeground,
+                    fontSize = 11.sp,
+                )
+                if (job.activity.totalFrames > 0) {
+                    val speed = job.activity.framesPerSecond?.let { " · %.3g frames/s".format(java.util.Locale.ROOT, it) }.orEmpty()
+                    Text(
+                        "${job.activity.completedFrames} / ${job.activity.totalFrames} frames$speed",
+                        color = AniLifeColors.MutedForeground,
+                        fontSize = 11.sp,
+                    )
+                }
+                if (job.activity.secondsSinceOutput >= 120) {
+                    Text(
+                        "No process output for ${job.activity.secondsSinceOutput}s. The current step may be slow or stalled; check the AniLife log or cancel and retry.",
+                        color = AniLifeColors.Warning,
+                        fontSize = 11.sp,
+                    )
+                }
             }
             job.error?.let { message ->
                 Text(message, color = AniLifeColors.Destructive, fontSize = 12.sp)

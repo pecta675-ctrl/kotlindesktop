@@ -60,6 +60,7 @@ import me.enivzoy.anilife.app.data.SillyMode
 import me.enivzoy.anilife.app.data.DEFAULT_DISCORD_APPLICATION_ID
 import me.enivzoy.anilife.app.data.DiscordPresenceManager
 import me.enivzoy.anilife.app.data.DownloadQueueManager
+import me.enivzoy.anilife.app.data.UpscaleQueueManager
 import me.enivzoy.anilife.app.data.DirectMediaDownloader
 import me.enivzoy.anilife.app.data.DownloadStatus
 import me.enivzoy.anilife.app.data.LocalPlayback
@@ -157,8 +158,10 @@ fun AniLifeApp(
     val releaseNotifier = remember(repository) { ReleaseNotifier(repository) }
     val updater = remember { Updater() }
     val availableUpdate by updater.update.collectAsState()
+    val scope = rememberCoroutineScope()
     val downloadScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     val downloadQueue = remember(repository) { DownloadQueueManager(repository, downloadScope, 2) }
+    val upscaleQueue = remember(repository) { UpscaleQueueManager(repository, scope) }
     val downloadJobs by downloadQueue.jobs.collectAsState()
     val autoDetect = remember(repository) {
         AutoDetectService(library = repository.asAutoDetectLibrary(), scope = downloadScope)
@@ -181,7 +184,6 @@ fun AniLifeApp(
     var homeLoaded by remember { mutableStateOf(false) }
     var playerFullscreen by remember { mutableStateOf(false) }
     var isPipMode by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     var updateCheckStatus by remember { mutableStateOf<String?>(null) }
     var checkingForUpdates by remember { mutableStateOf(false) }
@@ -725,6 +727,7 @@ fun AniLifeApp(
                         onOpen = { id -> navigateTo(Screen.Detail(id)) },
                         onBrowse = { navigateTo(Screen.Browse) },
                         queueManager = downloadQueue,
+                        upscaleQueue = upscaleQueue,
                     )
                     is Screen.Detail -> DetailScreen(
                         repository = repository,

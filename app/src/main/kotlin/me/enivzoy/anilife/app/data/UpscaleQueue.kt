@@ -26,6 +26,7 @@ data class UpscaleJob(
     val progress: Float = 0f,
     val error: String? = null,
     val outputPath: Path? = null,
+    val activity: UpscaleProgress = UpscaleProgress(),
 )
 
 class UpscaleQueueManager(
@@ -59,8 +60,8 @@ class UpscaleQueueManager(
                 if (!isActive) return@withPermit
                 update(job.id) { copy(status = UpscaleStatus.Upscaling, progress = 0f, error = null) }
                 try {
-                    val output = upscaler.upscale(job.localEpisode) { progress ->
-                        update(job.id) { copy(progress = progress.coerceIn(0f, 1f)) }
+                    val output = upscaler.upscale(job.localEpisode) { activity ->
+                        update(job.id) { copy(progress = activity.fraction.coerceIn(0f, 1f), activity = activity) }
                     }
                     update(job.id) { copy(status = UpscaleStatus.Completed, progress = 1f, outputPath = output) }
                     // a different audio label keeps the 4k file beside the original in the local store
@@ -107,7 +108,7 @@ class UpscaleQueueManager(
     fun retry(id: String) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
         if (job.status != UpscaleStatus.Failed && job.status != UpscaleStatus.Cancelled) return
-        update(id) { copy(status = UpscaleStatus.Queued, progress = 0f, error = null, outputPath = null) }
+        update(id) { copy(status = UpscaleStatus.Queued, progress = 0f, error = null, outputPath = null, activity = UpscaleProgress()) }
         launchJob(_jobs.value.first { it.id == id })
     }
 
