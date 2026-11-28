@@ -32,6 +32,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,8 @@ import me.enivzoy.anilife.app.data.AnimeEpisode
 import me.enivzoy.anilife.app.data.AnimeVideoProviders
 import me.enivzoy.anilife.app.data.AnimeVideoSource
 import me.enivzoy.anilife.app.data.AniListRepository
+import me.enivzoy.anilife.app.data.AniListSync
+import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
@@ -71,6 +74,10 @@ fun AnimeWatchScreen(
 ) {
     val anilistId = detail.id
     val title = detail.title
+    val aniListEntries by AniListSync.entries.collectAsState()
+    val continueEntries by ContinueStoreInstance.entries.collectAsState()
+    val watchedEpisodes = aniListEntries.firstOrNull { it.anime.id == anilistId }?.progress ?: 0
+    val continueProgress = continueEntries.firstOrNull { it.anime.id == anilistId }?.progress
     var episodes by remember(anilistId) { mutableStateOf<List<AnimeEpisode>>(emptyList()) }
     var loading by remember(anilistId) { mutableStateOf(true) }
     var error by remember(anilistId) { mutableStateOf<String?>(null) }
@@ -199,6 +206,7 @@ fun AnimeWatchScreen(
                                         episode = episode,
                                         selected = selectedEpisode == episode.number,
                                         loading = resolving == episode.number,
+                                        progress = episodeWatchProgress(episode.number, watchedEpisodes, continueProgress),
                                         onSelect = {
                                             selectedEpisode = episode.number
                                             playWhenResolved = null
@@ -346,14 +354,29 @@ private fun EpisodeRow(
     episode: AnimeEpisode,
     selected: Boolean,
     loading: Boolean,
+    progress: EpisodeWatchProgress?,
     onSelect: () -> Unit,
     onPlay: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
     Row(
         Modifier.fillMaxWidth().clip(shape)
-            .background(if (selected) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.035f))
-            .border(1.dp, if (selected) Color.White.copy(alpha = 0.45f) else Color.Transparent, shape)
+            .background(
+                when {
+                    selected -> AniLifeColors.Primary.copy(alpha = 0.12f)
+                    progress?.watched == true -> AniLifeColors.Primary.copy(alpha = 0.07f)
+                    else -> Color.White.copy(alpha = 0.035f)
+                },
+            )
+            .border(
+                1.dp,
+                when {
+                    selected -> AniLifeColors.Primary.copy(alpha = 0.7f)
+                    progress?.watched == true -> AniLifeColors.Primary.copy(alpha = 0.32f)
+                    else -> Color.Transparent
+                },
+                shape,
+            )
             .clickable(onClick = onSelect).padding(horizontal = 13.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -366,6 +389,7 @@ private fun EpisodeRow(
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Text(episode.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Text(episode.title?.takeIf(String::isNotBlank) ?: "Episode ${episodeNumber(episode.number)}", color = Color.White.copy(alpha = 0.52f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            progress?.let { EpisodeProgressBar(it.fraction, Modifier.padding(top = 5.dp)) }
         }
         if (selected) {
             Icon(Icons.Rounded.CheckCircle, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(19.dp))

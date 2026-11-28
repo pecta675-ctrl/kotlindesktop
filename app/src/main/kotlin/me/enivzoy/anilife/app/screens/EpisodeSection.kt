@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import me.enivzoy.anilife.app.data.AnimeEpisode
 import me.enivzoy.anilife.app.data.AnimeVideoProviders
+import me.enivzoy.anilife.app.data.ContinueProgress
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
@@ -59,6 +60,8 @@ private const val EPISODES_PER_RANGE = 100
 internal fun EpisodeSection(
     detail: AnimeDetail,
     providers: AnimeVideoProviders,
+    aniListWatchedEpisodes: Int = 0,
+    continueProgress: ContinueProgress? = null,
     onWatchEpisode: (Double) -> Unit,
 ) {
     var episodes by remember(detail.id) { mutableStateOf<List<AnimeEpisode>>(emptyList()) }
@@ -138,6 +141,8 @@ internal fun EpisodeSection(
                 } else {
                     null
                 },
+                aniListWatchedEpisodes = aniListWatchedEpisodes,
+                continueProgress = continueProgress,
                 onWatchEpisode = onWatchEpisode,
             )
         }
@@ -148,6 +153,8 @@ internal fun EpisodeSection(
 private fun EpisodePicker(
     episodes: List<AnimeEpisode>,
     fallbackArt: String?,
+    aniListWatchedEpisodes: Int,
+    continueProgress: ContinueProgress?,
     onWatchEpisode: (Double) -> Unit,
 ) {
     var newestFirst by remember { mutableStateOf(false) }
@@ -198,10 +205,11 @@ private fun EpisodePicker(
             verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 18.dp),
         ) {
             items(visible, key = AnimeEpisode::number) { episode ->
+                val progress = episodeWatchProgress(episode.number, aniListWatchedEpisodes, continueProgress)
                 if (compact) {
-                    CompactEpisodeButton(episode, onWatchEpisode)
+                    CompactEpisodeButton(episode, progress, onWatchEpisode)
                 } else {
-                    EpisodeCard(episode, fallbackArt, onWatchEpisode)
+                    EpisodeCard(episode, fallbackArt, progress, onWatchEpisode)
                 }
             }
         }
@@ -213,12 +221,19 @@ private fun EpisodePicker(
 private fun EpisodeCard(
     episode: AnimeEpisode,
     fallbackArt: String?,
+    progress: EpisodeWatchProgress?,
     onClick: (Double) -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
     Column(
         Modifier.fillMaxWidth()
             .clip(shape)
+            .background(if (progress?.watched == true) AniLifeColors.Primary.copy(alpha = 0.06f) else Color.Transparent)
+            .border(
+                1.dp,
+                if (progress?.watched == true) AniLifeColors.Primary.copy(alpha = 0.38f) else Color.Transparent,
+                shape,
+            )
             .clickable { onClick(episode.number) }
             .pointerHoverIcon(PointerIcon.Hand),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -260,6 +275,19 @@ private fun EpisodeCard(
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
             )
+            if (progress?.watched == true) {
+                Text(
+                    "Watched",
+                    Modifier.align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AniLifeColors.Primary.copy(alpha = 0.9f))
+                        .padding(horizontal = 7.dp, vertical = 4.dp),
+                    color = AniLifeColors.PrimaryForeground,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
         Text(
             episode.title?.takeIf(String::isNotBlank) ?: "Episode ${formatEpisodeNumber(episode.number)}",
@@ -279,27 +307,49 @@ private fun EpisodeCard(
                 maxLines = 1,
             )
         }
+        progress?.let { EpisodeProgressBar(it.fraction) }
     }
 }
 
 @Composable
-private fun CompactEpisodeButton(episode: AnimeEpisode, onClick: (Double) -> Unit) {
+private fun CompactEpisodeButton(
+    episode: AnimeEpisode,
+    progress: EpisodeWatchProgress?,
+    onClick: (Double) -> Unit,
+) {
     val shape = RoundedCornerShape(8.dp)
-    Box(
+    Column(
         Modifier.fillMaxWidth()
             .clip(shape)
-            .background(AniLifeColors.Card)
-            .border(1.dp, AniLifeColors.Border, shape)
+            .background(if (progress?.watched == true) AniLifeColors.Primary.copy(alpha = 0.10f) else AniLifeColors.Card)
+            .border(1.dp, if (progress?.watched == true) AniLifeColors.Primary.copy(alpha = 0.38f) else AniLifeColors.Border, shape)
             .clickable { onClick(episode.number) }
             .pointerHoverIcon(PointerIcon.Hand)
             .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
             formatEpisodeNumber(episode.number),
             color = AniLifeColors.Foreground,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
+        )
+        progress?.let { EpisodeProgressBar(it.fraction, Modifier.padding(top = 6.dp)) }
+    }
+}
+
+@Composable
+internal fun EpisodeProgressBar(fraction: Float, modifier: Modifier = Modifier) {
+    Box(
+        modifier.fillMaxWidth()
+            .heightIn(min = 3.dp)
+            .clip(CircleShape)
+            .background(AniLifeColors.Primary.copy(alpha = 0.18f)),
+    ) {
+        Box(
+            Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .heightIn(min = 3.dp)
+                .background(AniLifeColors.Primary),
         )
     }
 }
