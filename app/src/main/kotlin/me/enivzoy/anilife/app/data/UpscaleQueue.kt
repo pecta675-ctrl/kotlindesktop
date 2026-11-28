@@ -27,6 +27,7 @@ data class UpscaleJob(
     val error: String? = null,
     val outputPath: Path? = null,
     val activity: UpscaleProgress = UpscaleProgress(),
+    val mode: UpscaleMode = UpscaleMode.AIQuality,
 )
 
 class UpscaleQueueManager(
@@ -42,12 +43,13 @@ class UpscaleQueueManager(
     private val handles = mutableMapOf<String, Job>()
     private val upscaler = AnimeUpscaler()
 
-    fun enqueue(episodes: List<LocalEpisode>) {
+    fun enqueue(episodes: List<LocalEpisode>, mode: UpscaleMode = UpscaleMode.AIQuality) {
         episodes.forEach { entry ->
             val job = UpscaleJob(
                 localEpisode = entry,
                 title = entry.anime.title,
                 episode = entry.episode,
+                mode = mode,
             )
             _jobs.update { it + job }
             launchJob(job)
@@ -60,7 +62,7 @@ class UpscaleQueueManager(
                 if (!isActive) return@withPermit
                 update(job.id) { copy(status = UpscaleStatus.Upscaling, progress = 0f, error = null) }
                 try {
-                    val output = upscaler.upscale(job.localEpisode) { activity ->
+                    val output = upscaler.upscale(job.localEpisode, job.mode) { activity ->
                         update(job.id) { copy(progress = activity.fraction.coerceIn(0f, 1f), activity = activity) }
                     }
                     update(job.id) { copy(status = UpscaleStatus.Completed, progress = 1f, outputPath = output) }
@@ -69,7 +71,7 @@ class UpscaleQueueManager(
                         listOf(
                             job.localEpisode.copy(
                                 path = output,
-                                audio = "4k",
+                                audio = job.mode.audioTag,
                                 bytes = runCatching { Files.size(output) }.getOrDefault(0L),
                             ),
                         ),

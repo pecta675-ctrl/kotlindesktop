@@ -11,6 +11,19 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LocalPlaybackTest {
+    @Test
+    fun both4kModesKeepDistinctLibraryKeysAndUseThePreferredOnlineAudio() {
+        val original = LocalEpisode(AnimeCard(21, "Sample"), 1.0, "dub", Path.of("sample.mkv"), 1)
+        val ai = original.copy(audio = UpscaleMode.AIQuality.audioTag, path = Path.of("sample_4k.mkv"))
+        val fast = original.copy(audio = UpscaleMode.Fast4K.audioTag, path = Path.of("sample_fast_4k.mkv"))
+        assertTrue(ai.isUpscaled())
+        assertTrue(fast.isUpscaled())
+        assertEquals(3, listOf(original, ai, fast).map(::entryKey).distinct().size)
+        assertEquals("dub", playbackAudio(fast.audio, "dub"))
+        assertEquals("dub", playbackAudio(ai.audio, "dub"))
+        assertEquals("sub", playbackAudio("sub", "dub"))
+    }
+
     private fun card(
         id: Long = 21,
         title: String = "Frieren",

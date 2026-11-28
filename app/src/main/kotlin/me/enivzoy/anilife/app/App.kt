@@ -65,6 +65,7 @@ import me.enivzoy.anilife.app.data.DirectMediaDownloader
 import me.enivzoy.anilife.app.data.DownloadStatus
 import me.enivzoy.anilife.app.data.LocalPlayback
 import me.enivzoy.anilife.app.data.isUpscaled
+import me.enivzoy.anilife.app.data.playbackAudio
 import me.enivzoy.anilife.app.data.toDetail
 import me.enivzoy.anilife.app.data.ProviderCatalog
 import me.enivzoy.anilife.app.screens.BrowseScreen
@@ -452,7 +453,7 @@ fun AniLifeApp(
             return
         }
         val startedAt = System.nanoTime()
-        val onlineAudio = if (audio.equals(me.enivzoy.anilife.app.data.UPSCALED_AUDIO, ignoreCase = true)) settings.audio else audio
+        val onlineAudio = playbackAudio(audio, settings.audio)
         val rows = animeVideoProviders.episodes(anime.id, anime.episodes, anime.malId)
         val resolved = animeVideoProviders.sources(
             anilistId = anime.id,
@@ -485,7 +486,7 @@ fun AniLifeApp(
             url = selected.url,
             headers = selected.headers,
             alternatives = resolved,
-            audioTrack = audio,
+            audioTrack = onlineAudio,
             audioResolving = false,
             audioError = null,
             episode = episode,
@@ -498,6 +499,7 @@ fun AniLifeApp(
 
     fun smartDownloadNext(anime: AnimeDetail?, episode: Double, audio: String) {
         if (!settings.expSmartDownloads || anime == null) return
+        val onlineAudio = playbackAudio(audio, settings.audio)
         val key = "${anime.id}:$episode"
         if (key in smartDownloaded) return
         val alreadyDownloaded = repository.localEpisodes.value.any { it.anime.id == anime.id && it.episode == episode }
@@ -515,7 +517,7 @@ fun AniLifeApp(
                     malId = anime.malId,
                     titles = titles,
                     episode = episode,
-                    dub = audio.equals("Dub", ignoreCase = true),
+                    dub = onlineAudio.equals("Dub", ignoreCase = true),
                 )
                 val source = me.enivzoy.anilife.app.data.pickDownloadSource(
                     sources,
@@ -542,7 +544,7 @@ fun AniLifeApp(
                             malId = anime.malId,
                             titles = titles,
                             episode = episode,
-                            dub = audio.equals("Dub", ignoreCase = true),
+                            dub = onlineAudio.equals("Dub", ignoreCase = true),
                             refresh = exclusions.urls.isNotEmpty(),
                         )
                         me.enivzoy.anilife.app.data.pickDownloadSource(

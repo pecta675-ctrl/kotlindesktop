@@ -97,7 +97,7 @@ private fun UpscaleJobCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        "Episode ${formatUpscaleEpisode(job.episode)}",
+                        "Episode ${formatUpscaleEpisode(job.episode)} · ${job.mode.label}",
                         color = AniLifeColors.MutedForeground,
                         fontSize = 12.sp,
                     )

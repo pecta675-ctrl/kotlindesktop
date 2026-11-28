@@ -8,8 +8,13 @@ import java.nio.file.Path
 
 const val UPSCALED_AUDIO = "4k"
 
+fun isUpscaledAudio(audio: String): Boolean =
+    audio.equals(UPSCALED_AUDIO, ignoreCase = true) || audio.equals("4k-fast", ignoreCase = true)
+
+fun playbackAudio(audio: String, fallback: String): String = if (isUpscaledAudio(audio)) fallback else audio
+
 fun LocalEpisode.isUpscaled(): Boolean =
-    audio.equals(UPSCALED_AUDIO, ignoreCase = true) ||
+    isUpscaledAudio(audio) ||
         path.fileName?.toString()?.contains("_4k", ignoreCase = true) == true
 
 fun AnimeCard.toDetail(): AnimeDetail = AnimeDetail(

@@ -471,9 +471,9 @@ fun DownloadsScreen(
         UpscaleSelectionDialog(
             episodes = episodes,
             onDismiss = { showUpscaleDialog = false },
-            onConfirm = { selected ->
+            onConfirm = { selected, mode ->
                 showUpscaleDialog = false
-                upscaleQueue.enqueue(selected)
+                upscaleQueue.enqueue(selected, mode)
                 topTab = 1
             },
         )

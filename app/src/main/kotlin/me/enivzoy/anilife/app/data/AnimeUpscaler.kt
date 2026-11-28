@@ -6,6 +6,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
@@ -31,8 +32,12 @@ private val upscaleLogger = KotlinLogging.logger {}
 private const val LINUX_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
 private const val MAC_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip"
 
-class AnimeUpscaler {
-    suspend fun upscale(episode: LocalEpisode, onProgress: (UpscaleProgress) -> Unit): Path =
+class AnimeUpscaler(private val allowHardwareEncoding: Boolean = true) {
+    suspend fun upscale(
+        episode: LocalEpisode,
+        mode: UpscaleMode = UpscaleMode.AIQuality,
+        onProgress: (UpscaleProgress) -> Unit,
+    ): Path =
         withContext(Dispatchers.IO) {
             var lastFraction = 0f
             var lastStage: UpscaleStage? = null
@@ -63,6 +68,9 @@ class AnimeUpscaler {
                 ?: error("ffprobe is missing from AniLife's managed runtime.")
             val source = probe(ffprobe, input)
             require(source.duration > 0) { "Couldn't read the episode duration." }
+            if (mode == UpscaleMode.Fast4K) {
+                return@withContext fastUpscale(ffmpeg, ffprobe, input, source, onProgress)
+            }
             val scale = (TARGET_HEIGHT.toDouble() / source.height).roundToInt().coerceIn(2, 4)
             totalFrames = (source.duration * source.rate).roundToLong()
             val sourceLabel = "${source.width}×${source.height} → 2160p"
@@ -191,6 +199,97 @@ class AnimeUpscaler {
                 deleteRecursively(temporary)
             }
         }
+
+    private suspend fun fastUpscale(
+        ffmpeg: String,
+        ffprobe: String,
+        input: Path,
+        source: Source,
+        onProgress: (UpscaleProgress) -> Unit,
+    ): Path {
+        val total = (source.duration * source.rate).roundToLong().coerceAtLeast(1)
+        val frames = AtomicLong()
+        val timeMicros = AtomicLong()
+        val sourceLabel = "${source.width}×${source.height} → 2160p"
+        var lastFraction = 0f
+        var lastStage: UpscaleStage? = null
+        var lastLog = 0L
+        var started = System.nanoTime()
+        fun report(stage: UpscaleStage, fraction: Float, detail: String, idle: Long = 0) {
+            lastFraction = maxOf(lastFraction, fraction)
+            val elapsed = (System.nanoTime() - started) / 1_000_000_000.0
+            val done = frames.get()
+            val speed = if (elapsed > 0 && done > 0) done / elapsed else null
+            onProgress(UpscaleProgress(lastFraction, stage, detail, done, if (stage == UpscaleStage.Completed) done else total, speed, idle))
+            if (lastStage != stage || System.nanoTime() - lastLog >= TimeUnit.SECONDS.toNanos(30)) {
+                upscaleLogger.info { "fast 4K ${formatUpscalePercent(lastFraction)} stage=$stage frames=$done/$total fps=$speed idleSeconds=$idle $detail" }
+                lastStage = stage
+                lastLog = System.nanoTime()
+            }
+        }
+        report(UpscaleStage.Preparing, 0.01f, "Selecting fast encoder · $sourceLabel")
+        val encoder = fastEncoder(ffmpeg, source)
+        val output = outputPath(input, fast = true)
+        upscaleLogger.info { "fast 4K source=${input.fileName} encoder=${encoder.name} output=${output.fileName}" }
+        try {
+            val detail = "Fast 4K · ${encoder.name} · $sourceLabel · resizing + light sharpening (not AI)"
+            started = System.nanoTime()
+            report(UpscaleStage.Encoding, 0.05f, detail)
+            run(
+                listOf(
+                    ffmpeg, "-v", "error", "-y", "-progress", "pipe:1", "-nostats", "-i", input.toString(),
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", "scale=-2:$TARGET_HEIGHT:flags=lanczos,unsharp=5:5:0.35:3:3:0",
+                    "-pix_fmt", encoder.pixelFormat,
+                ) + encoder.arguments + listOf("-c:a", "copy", output.toAbsolutePath().toString()),
+                onLine = { line ->
+                    if (line.startsWith("frame=")) line.substringAfter('=').trim().toLongOrNull()?.let(frames::set)
+                    if (line.startsWith("out_time_us=")) line.substringAfter('=').trim().toLongOrNull()?.let(timeMicros::set)
+                },
+            ) { idle ->
+                val fraction = (timeMicros.get() / (source.duration * 1_000_000)).coerceIn(0.0, 1.0)
+                report(UpscaleStage.Encoding, (0.05 + 0.94 * fraction).toFloat(), detail, idle)
+            }
+            checkActive()
+            report(UpscaleStage.Encoding, 0.99f, "Verifying 2160p output")
+            val result = probe(ffprobe, output)
+            require(result.height == TARGET_HEIGHT && Files.size(output) > 0) { "Fast 4K didn't produce a valid 2160p video." }
+            report(UpscaleStage.Completed, 1f, "Fast 4K copy saved · original kept")
+            return output
+        } catch (failure: Throwable) {
+            Files.deleteIfExists(output)
+            if (failure is CancellationException) upscaleLogger.info { "fast 4K cancelled frames=${frames.get()}/$total" }
+            else upscaleLogger.error(failure) { "fast 4K failed frames=${frames.get()}/$total" }
+            throw failure
+        }
+    }
+
+    private suspend fun fastEncoder(ffmpeg: String, source: Source): FastEncoder {
+        if (isWindows && allowHardwareEncoding) {
+            val qsv = FastEncoder("Intel QSV", listOf("-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "22"), "nv12")
+            val width = ((source.width.toDouble() * TARGET_HEIGHT / source.height) / 2).roundToInt() * 2
+            try {
+                val available = withTimeoutOrNull(15_000) {
+                    run(
+                        listOf(
+                            ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=size=${width}x$TARGET_HEIGHT:rate=1:duration=1",
+                            "-frames:v", "1", "-pix_fmt", qsv.pixelFormat,
+                        ) + qsv.arguments + listOf("-f", "null", "-"),
+                    )
+                    true
+                } ?: false
+                if (available) return qsv
+                upscaleLogger.warn { "fast 4K Intel QSV check timed out; using software encoder" }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                upscaleLogger.warn { "fast 4K Intel QSV unavailable; using software encoder: ${failure.message}" }
+            }
+        }
+        return FastEncoder("Software (veryfast)", listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "20"), "yuv420p")
+    }
+
+    private data class FastEncoder(val name: String, val arguments: List<String>, val pixelFormat: String)
 
     private suspend fun findUpscaler(onProgress: (Float) -> Unit, scale: Int): String {
         val configured = System.getProperty("AniLife.upscaler.dir")?.takeIf(String::isNotBlank)?.let { Path.of(it) }
@@ -373,16 +472,17 @@ class AnimeUpscaler {
             entries.filter { it.fileName.toString().endsWith(".png", ignoreCase = true) }.count()
         }
 
-    private fun outputPath(input: Path): Path {
+    private fun outputPath(input: Path, fast: Boolean = false): Path {
         val name = input.fileName.toString()
         val dot = name.lastIndexOf('.')
         val base = if (dot > 0) name.substring(0, dot) else name
         val extension = if (dot > 0) name.substring(dot) else ".mp4"
         val parent = input.parent ?: Path.of(".")
-        var candidate = parent.resolve("${base}_4k$extension")
+        val suffix = if (fast) "_fast_4k" else "_4k"
+        var candidate = parent.resolve("$base$suffix$extension")
         var index = 2
         while (Files.exists(candidate)) {
-            candidate = parent.resolve("${base}_4k_$index$extension")
+            candidate = parent.resolve("${base}${suffix}_$index$extension")
             index++
         }
         return candidate

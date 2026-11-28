@@ -29,12 +29,15 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import me.enivzoy.anilife.app.data.LocalEpisode
+import me.enivzoy.anilife.app.data.UpscaleMode
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.adaptiveGlass
@@ -56,10 +60,11 @@ private val UpscaleDialogShape = RoundedCornerShape(16.dp)
 fun UpscaleSelectionDialog(
     episodes: List<LocalEpisode>,
     onDismiss: () -> Unit,
-    onConfirm: (List<LocalEpisode>) -> Unit,
+    onConfirm: (List<LocalEpisode>, UpscaleMode) -> Unit,
 ) {
     val selectedKeys = remember { mutableStateListOf<String>() }
-    val selected by remember {
+    var mode by remember { mutableStateOf(UpscaleMode.Fast4K) }
+    val selected by remember(episodes) {
         derivedStateOf { episodes.filter { upscaleKey(it) in selectedKeys } }
     }
     val estimatedGigabytes = "%.1f".format(selected.size * 1.5)
@@ -84,7 +89,7 @@ fun UpscaleSelectionDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "Upscale downloaded animes to 4k",
+                        "Upscale downloads to 4K",
                         color = AniLifeColors.Foreground,
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
@@ -109,6 +114,27 @@ fun UpscaleSelectionDialog(
                         .padding(horizontal = 24.dp, vertical = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        UpscaleMode.entries.forEach { option ->
+                            val active = mode == option
+                            Row(
+                                Modifier.weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (active) AniLifeColors.Secondary else AniLifeColors.Card)
+                                    .border(1.dp, if (active) AniLifeColors.Primary else AniLifeColors.Border, RoundedCornerShape(12.dp))
+                                    .clickable { mode = option }
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                RadioButton(selected = active, onClick = { mode = option })
+                                Column(Modifier.weight(1f).padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Text(option.label, color = AniLifeColors.Foreground, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                    Text(option.description, color = AniLifeColors.MutedForeground, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                    Text("Creates a separate 2160p copy. Your original file is kept.", color = AniLifeColors.MutedForeground, fontSize = 11.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         UpscaleChip("Select All") { selectedKeys.addAll(episodes.map(::upscaleKey)) }
                         UpscaleChip("Clear All") { selectedKeys.clear() }
@@ -198,7 +224,7 @@ fun UpscaleSelectionDialog(
                         ),
                     ) { Text("Cancel", fontSize = 13.sp, fontWeight = FontWeight.Medium) }
                     Button(
-                        onClick = { onConfirm(selected) },
+                        onClick = { onConfirm(selected, mode) },
                         enabled = selected.isNotEmpty(),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.height(40.dp),
@@ -210,7 +236,7 @@ fun UpscaleSelectionDialog(
                         ),
                     ) {
                         Text(
-                            "Upscale ${selected.size} ${if (selected.size == 1) "Episode" else "Episodes"}",
+                            "${mode.label} · ${selected.size} ${if (selected.size == 1) "Episode" else "Episodes"}",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                         )
