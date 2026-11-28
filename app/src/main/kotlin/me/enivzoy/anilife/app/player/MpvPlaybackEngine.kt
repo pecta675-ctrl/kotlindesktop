@@ -24,6 +24,7 @@ import org.jetbrains.skia.ColorType
 import org.jetbrains.skia.Image as SkiaImage
 import org.jetbrains.skia.ImageInfo
 import java.io.File
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -380,7 +381,20 @@ private val playbackBufferSize: String = "auto",
             }
             PlayerAction.SPEED_UP -> mpv.command("add", "speed", "0.1")
             PlayerAction.SPEED_DOWN -> mpv.command("add", "speed", "-0.1")
+            PlayerAction.FRAME_STEP_FORWARD -> stepFrame(mpv, 1)
+            PlayerAction.FRAME_STEP_BACKWARD -> stepFrame(mpv, -1)
+            PlayerAction.TAKE_SCREENSHOT -> Unit
         }
+    }
+
+    private fun stepFrame(mpv: Mpv, direction: Int) {
+        mpv.command("set", "pause", "yes")
+        mpv.command(if (direction > 0) "frame-step" else "frame-back-step")
+    }
+
+    fun screenshotTo(path: Path): Boolean {
+        val mpv = player ?: return false
+        return runCatching { mpv.screenshotToFile(path.toString()) }.isSuccess
     }
 
     fun seekTo(seconds: Double) {

@@ -17,6 +17,9 @@ enum class PlayerAction(val label: String) {
     SPEED_UP("Speed up"),
     SPEED_DOWN("Speed down"),
     TOGGLE_PIP("Picture in picture"),
+    FRAME_STEP_FORWARD("Next frame"),
+    FRAME_STEP_BACKWARD("Previous frame"),
+    TAKE_SCREENSHOT("Save screenshot"),
     ;
 }
 
@@ -35,6 +38,9 @@ val DefaultPlayerKeyBindings: Map<PlayerAction, Key> = linkedMapOf(
     PlayerAction.SPEED_UP to Key.RightBracket,
     PlayerAction.SPEED_DOWN to Key.LeftBracket,
     PlayerAction.TOGGLE_PIP to Key.I,
+    PlayerAction.FRAME_STEP_FORWARD to Key.D,
+    PlayerAction.FRAME_STEP_BACKWARD to Key.A,
+    PlayerAction.TAKE_SCREENSHOT to Key.S,
 )
 
 private val DefaultPlayerKeyAliases: Map<Key, PlayerAction> = mapOf(
