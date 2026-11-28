@@ -434,6 +434,11 @@ class Mpv(
         runCommand(arguments.joinToString(" "))
     }
 
+    fun screenshotToFile(path: String, mode: String = "video") {
+        val escaped = path.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "")
+        runCommand("screenshot-to-file \"$escaped\" $mode")
+    }
+
     private fun runCommand(value: String) {
         val code = callInt(mpvCommandString, arrayOf<Any?>(handle, cstr(value)))
         if (code != MPV_ERROR_NONE) logger.error { "mpv command failed code=$code ${errorString(code)}" }

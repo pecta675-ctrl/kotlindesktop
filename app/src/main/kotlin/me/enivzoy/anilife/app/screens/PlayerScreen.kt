@@ -29,6 +29,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -71,6 +72,7 @@ import me.enivzoy.anilife.app.data.AppSettings
 import me.enivzoy.anilife.app.data.DiscordPlaybackInfo
 import me.enivzoy.anilife.app.data.Presence
 import me.enivzoy.anilife.app.data.PlayerAction
+import me.enivzoy.anilife.app.data.ScreenshotSaver
 import me.enivzoy.anilife.app.data.AniListSync
 import me.enivzoy.anilife.app.data.AudioLanguages
 import me.enivzoy.anilife.app.data.MyAnimeListSync
@@ -85,6 +87,9 @@ import me.enivzoy.anilife.core.model.SkipTimes
 import me.enivzoy.anilife.core.model.Window
 import me.enivzoy.anilife.core.net.AniSkipClient
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.awt.Point
@@ -96,6 +101,14 @@ private val HiddenPlayerCursor: PointerIcon by lazy {
         val image = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)
         PointerIcon(Toolkit.getDefaultToolkit().createCustomCursor(image, Point(0, 0), "hidden-player-cursor"))
     }.getOrDefault(PointerIcon.Default)
+}
+
+private suspend fun awaitFile(file: java.nio.file.Path): Boolean {
+    repeat(60) {
+        if (runCatching { java.nio.file.Files.size(file) > 0L }.getOrDefault(false)) return true
+        delay(50)
+    }
+    return false
 }
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
@@ -326,6 +339,14 @@ fun PlayerScreen(
     var openPanel by remember { mutableStateOf<String?>(null) }
     var controlsVisible by remember(title, episode) { mutableStateOf(true) }
     var pointerActivity by remember(title, episode) { mutableIntStateOf(0) }
+    var isCapturingScreenshot by remember { mutableStateOf(false) }
+    var screenshotNotice by remember { mutableStateOf<String?>(null) }
+    val screenshotScope = rememberCoroutineScope()
+    LaunchedEffect(screenshotNotice) {
+        if (screenshotNotice == null) return@LaunchedEffect
+        delay(4000)
+        screenshotNotice = null
+    }
 
     val activeSkip = remember(skipTimes, positionSeconds, durationSeconds) {
         activeSkipWindow(skipTimes, positionSeconds, durationSeconds)
@@ -546,6 +567,45 @@ fun PlayerScreen(
                 val action = if (delta > 0) PlayerAction.SUBTITLE_DELAY_LATER else PlayerAction.SUBTITLE_DELAY_EARLIER
                 if (engine != null) engine.runPlayerAction(action)
             },
+            onFrameStep = { direction ->
+                if (engine != null) {
+                    engine.runPlayerAction(
+                        if (direction > 0) PlayerAction.FRAME_STEP_FORWARD else PlayerAction.FRAME_STEP_BACKWARD,
+                    )
+                } else {
+                    simulatedPlaying = false
+                    simulatedPosition = (simulatedPosition + direction / 24.0).coerceIn(0.0, fallbackDurationSeconds)
+                }
+            },
+            onScreenshot = {
+                if (engine == null) {
+                    screenshotNotice = "Screenshots need a playing video."
+                } else if (!isCapturingScreenshot) {
+                    isCapturingScreenshot = true
+                    screenshotScope.launch {
+                        val raw = runCatching { ScreenshotSaver.temporaryFile() }.getOrNull()
+                        if (raw != null) runCatching { java.nio.file.Files.deleteIfExists(raw) }
+                        val wasVisible = controlsVisible
+                        controlsVisible = false
+                        delay(100)
+                        val captured = raw != null && withContext(Dispatchers.IO) {
+                            engine.screenshotTo(raw) && awaitFile(raw)
+                        }
+                        isCapturingScreenshot = false
+                        controlsVisible = wasVisible
+                        var saved: java.nio.file.Path? = null
+                        if (raw != null) {
+                            if (captured) saved = runCatching { ScreenshotSaver.finish(raw, settings.screenshotResolution) }.getOrNull()
+                            if (saved == null) runCatching { java.nio.file.Files.deleteIfExists(raw) }
+                        }
+                        screenshotNotice = when {
+                            saved != null -> "Screenshot saved to ${saved.parent}"
+                            captured -> "Could not save the screenshot."
+                            else -> "Could not capture the frame."
+                        }
+                    }
+                }
+            },
         )
     )
 
@@ -610,7 +670,8 @@ fun PlayerScreen(
         },
     ) {
         if (!isPipMode) videoSurface(Modifier.fillMaxSize())
-        val notice = engine?.switchError
+        val notice = screenshotNotice
+            ?: engine?.switchError
             ?: engine?.error
             ?: engine?.takeIf { it.isLoading && it.videoFrame == null }?.let { "Buffering…" }
         if (notice != null) {
@@ -668,7 +729,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = controlsVisible && !isCapturingScreenshot,
             modifier = Modifier.fillMaxSize(),
             enter = fadeIn(appTween(180)),
             exit = fadeOut(appTween(260)),

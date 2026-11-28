@@ -68,6 +68,7 @@ data class AppSettings(
     val playbackBufferSize: String = "auto",
     val gpuAcceleration: String = "auto",
     val contentScale: String = "fit",
+    val screenshotResolution: String = "native",
     val showSkipButton: Boolean = true,
     val skipButtonSeconds: Int = 85,
     val autoSkipIntro: Boolean = false,
@@ -178,6 +179,7 @@ class AppSettingsStore(private val file: File = settingsFile()) {
             gpuAcceleration = properties.getProperty("gpuAcceleration")
                 ?: if (properties.getProperty("hardwareDecoding") == "false") "off" else "auto",
             contentScale = properties.getProperty("contentScale", "fit"),
+            screenshotResolution = properties.getProperty("screenshotResolution", "native"),
             showSkipButton = properties.getProperty("showSkipButton", "true").toBooleanStrictOrNull() ?: true,
             skipButtonSeconds = properties.getProperty("skipButtonSeconds", "85").toIntOrNull() ?: 85,
             autoSkipIntro = properties.getProperty("autoSkipIntro", "false").toBooleanStrictOrNull() ?: false,
@@ -258,6 +260,7 @@ class AppSettingsStore(private val file: File = settingsFile()) {
             setProperty("playbackBufferSize", settings.playbackBufferSize)
             setProperty("gpuAcceleration", settings.gpuAcceleration)
             setProperty("contentScale", settings.contentScale)
+            setProperty("screenshotResolution", settings.screenshotResolution)
             setProperty("showSkipButton", settings.showSkipButton.toString())
             setProperty("skipButtonSeconds", settings.skipButtonSeconds.toString())
             setProperty("autoSkipIntro", settings.autoSkipIntro.toString())
@@ -330,6 +333,7 @@ class AppSettingsStore(private val file: File = settingsFile()) {
         playbackBufferSize = playbackBufferSize.takeIf { it in bufferSizes } ?: "auto",
         gpuAcceleration = gpuAcceleration.takeIf { it in gpuAccelerationModes } ?: "auto",
         contentScale = contentScale.takeIf { it in contentScales } ?: "fit",
+        screenshotResolution = screenshotResolution.takeIf { it in screenshotResolutions } ?: "native",
         skipButtonSeconds = skipButtonSeconds.coerceIn(10, 300),
         volume = volume.coerceIn(0, 100),
         subtitleScale = subtitleScale.takeIf(Float::isFinite)?.coerceIn(0.5f, 2f) ?: 1f,
@@ -379,6 +383,7 @@ class AppSettingsStore(private val file: File = settingsFile()) {
     companion object {
         val bufferSizes = listOf("auto", "small", "medium", "large")
         val contentScales = listOf("fit", "crop", "fill")
+        val screenshotResolutions = listOf("native", "4k", "8k")
         val supportedSubtitleLanguages = listOf("en", "ja", "es", "pt", "fr", "de", "it", "ru", "ar", "zh", "none")
         val fontFamilies = listOf("SansSerif", "Serif", "Monospaced", "Cursive")
         val themeModes = setOf("DEFAULT", "FROSTED_GLASS", "LIQUID_GLASS")

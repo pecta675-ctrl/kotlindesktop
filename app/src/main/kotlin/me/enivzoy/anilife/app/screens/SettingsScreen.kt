@@ -609,6 +609,16 @@ private fun PlayerSettings(
             )
         }
         SettingsRow(
+            "Screenshot resolution",
+            "Screenshots are saved to Pictures/AniLife. 4K and 8K upscale the frame with Real-ESRGAN and take a few seconds.",
+        ) {
+            SettingsSegmented(
+                choices = listOf("native" to "Native", "4k" to "4K", "8k" to "8K"),
+                selected = settings.screenshotResolution,
+                onSelect = { value -> onSettingsChange { it.copy(screenshotResolution = value) } },
+            )
+        }
+        SettingsRow(
             "Volume",
             "Default player volume.",
         ) {

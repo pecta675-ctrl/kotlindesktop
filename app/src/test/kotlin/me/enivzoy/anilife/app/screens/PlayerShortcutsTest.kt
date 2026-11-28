@@ -19,6 +19,8 @@ class PlayerShortcutsTest {
         var pips = 0
         val speeds = mutableListOf<Float>()
         val delays = mutableListOf<Double>()
+        val steps = mutableListOf<Int>()
+        var screenshots = 0
     }
 
     private fun shortcuts(recorded: Recorder) = PlayerShortcuts(
@@ -30,6 +32,8 @@ class PlayerShortcutsTest {
         onTogglePip = { recorded.pips += 1 },
         onSpeedChange = { recorded.speeds += it },
         onSubtitleDelay = { recorded.delays += it },
+        onFrameStep = { recorded.steps += it },
+        onScreenshot = { recorded.screenshots += 1 },
     )
 
     private fun press(recorded: Recorder, key: Key, bindings: Map<PlayerAction, Key> = DefaultPlayerKeyBindings) {
@@ -78,6 +82,18 @@ class PlayerShortcutsTest {
         assertEquals(1, recorded.pips)
         assertEquals(listOf(-0.1, 0.1), recorded.delays)
         assertEquals(listOf(-0.1f, 0.1f), recorded.speeds)
+    }
+
+    @Test
+    fun frameSteppingAndScreenshotsHaveDefaultKeys() {
+        val recorded = Recorder()
+
+        press(recorded, Key.D)
+        press(recorded, Key.A)
+        press(recorded, Key.S)
+
+        assertEquals(listOf(1, -1), recorded.steps)
+        assertEquals(1, recorded.screenshots)
     }
 
     @Test

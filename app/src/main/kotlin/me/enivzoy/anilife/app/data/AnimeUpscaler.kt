@@ -15,9 +15,12 @@ import java.util.Comparator
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
+import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 private const val MODEL = "realesr-animevideov3"
-private const val MODEL_SCALE = 4
+private const val TARGET_HEIGHT = 2160
+private const val CHUNK_SECONDS = 60.0
 private const val LINUX_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
 private const val MAC_ARCHIVE = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip"
 
@@ -26,49 +29,85 @@ class AnimeUpscaler {
         withContext(Dispatchers.IO) {
             val input = episode.path
             require(Files.isRegularFile(input)) { "Episode file not found: ${input}" }
-            val tools = prepareTools(onProgress)
-            val fps = detectFps(tools.ffprobe, input)
+            val ffmpeg = findTool("ffmpeg")
+                ?: error("ffmpeg is missing from AniLife's managed runtime.")
+            val ffprobe = findTool("ffprobe")
+                ?: error("ffprobe is missing from AniLife's managed runtime.")
+            val source = probe(ffprobe, input)
+            require(source.duration > 0) { "Couldn't read the episode duration." }
+            val scale = (TARGET_HEIGHT.toDouble() / source.height).roundToInt().coerceIn(2, 4)
+            val upscaler = findUpscaler(onProgress, scale)
             val report = { fraction: Float -> onProgress((0.05f + 0.95f * fraction).coerceIn(0f, 1f)) }
+            val chunkFrames = (CHUNK_SECONDS * source.rate).roundToInt().coerceAtLeast(1)
+            val chunks = ceil(source.duration * source.rate / chunkFrames).toInt().coerceAtLeast(1)
             val temporary = Files.createTempDirectory("anilife-upscale-")
             try {
-                val frames = Files.createDirectory(temporary.resolve("frames"))
-                val upscaled = Files.createDirectory(temporary.resolve("upscaled"))
-                report(0.05f)
-                run(
-                    listOf(
-                        tools.ffmpeg, "-y", "-i", input.toString(),
-                        "-qscale:v", "1", "-qmin", "1", "-qmax", "1", "-vsync", "0",
-                        frames.resolve("frame%08d.png").toString(),
-                    ),
-                )
-                checkActive()
-                report(0.15f)
-                val total = countFrames(frames)
-                require(total > 0) { "ffmpeg didn't extract any frames." }
-                run(
-                    listOf(
-                        tools.upscaler, "-i", frames.toString(), "-o", upscaled.toString(),
-                        "-n", MODEL, "-s", MODEL_SCALE.toString(), "-f", "png",
-                    ),
-                    workingDirectory = File(tools.upscaler).absoluteFile.parentFile,
-                ) {
-                    val current = countFrames(upscaled)
-                    report(0.15f + 0.75f * (current.toFloat() / total).coerceIn(0f, 1f))
-                    delay(300)
+                val parts = mutableListOf<Path>()
+                report(0.02f)
+                repeat(chunks) { index ->
+                    checkActive()
+                    val part = temporary.resolve("part%05d.mkv".format(index))
+                    val chunk = Files.createDirectory(temporary.resolve("chunk%05d".format(index)))
+                    try {
+                        val frames = Files.createDirectory(chunk.resolve("frames"))
+                        val upscaled = Files.createDirectory(chunk.resolve("upscaled"))
+                        val start = index.toDouble() * chunkFrames / source.rate
+                        run(
+                            listOf(
+                                ffmpeg, "-v", "error", "-y",
+                                "-ss", "%.3f".format(start), "-i", input.toString(),
+                                "-frames:v", chunkFrames.toString(),
+                                "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
+                                frames.resolve("frame%08d.png").toString(),
+                            ),
+                        )
+                        checkActive()
+                        val total = countFrames(frames)
+                        require(total > 0) { "ffmpeg didn't extract any frames." }
+                        run(
+                            listOf(
+                                upscaler, "-i", frames.toString(), "-o", upscaled.toString(),
+                                "-n", MODEL, "-s", scale.toString(), "-f", "png",
+                            ),
+                            workingDirectory = File(upscaler).absoluteFile.parentFile,
+                        ) {
+                            val done = countFrames(upscaled)
+                            report((index + done.toFloat() / total) / chunks)
+                            delay(300)
+                        }
+                        checkActive()
+                        val written = countFrames(upscaled)
+                        require(written == total) { "Upscaled $written of $total frames in part ${index + 1}." }
+                        run(
+                            listOf(
+                                ffmpeg, "-v", "error", "-y", "-framerate", source.rate.toString(),
+                                "-i", upscaled.resolve("frame%08d.png").toString(),
+                                "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+                                part.toString(),
+                            ),
+                        )
+                        parts.add(part)
+                    } finally {
+                        deleteRecursively(chunk)
+                    }
                 }
                 checkActive()
-                val written = countFrames(upscaled)
-                require(written == total) { "Upscaled $written of $total frames." }
-                report(0.9f)
+                report(0.95f)
                 val output = outputPath(input)
+                val video = temporary.resolve("video.mkv")
+                val listing = temporary.resolve("parts.txt")
+                Files.writeString(listing, parts.joinToString("\n") { "file '${it.fileName}'" })
+                run(
+                    listOf(ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", listing.fileName.toString(), "-c", "copy", video.fileName.toString()),
+                    workingDirectory = temporary.toFile(),
+                )
                 run(
                     listOf(
-                        tools.ffmpeg, "-y", "-framerate", fps,
-                        "-i", upscaled.resolve("frame%08d.png").toString(),
-                        "-i", input.toString(), "-map", "0:v:0", "-map", "1:a?",
-                        "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-c:a", "copy", output.toString(),
+                        ffmpeg, "-v", "error", "-y",
+                        "-i", video.fileName.toString(), "-i", input.toString(),
+                        "-map", "0:v:0", "-map", "1:a?", "-c", "copy", output.toAbsolutePath().toString(),
                     ),
+                    workingDirectory = temporary.toFile(),
                 )
                 checkActive()
                 report(1f)
@@ -78,24 +117,15 @@ class AnimeUpscaler {
             }
         }
 
-    private suspend fun prepareTools(onProgress: (Float) -> Unit): Tools {
-        val ffmpeg = findTool("ffmpeg")
-            ?: error("ffmpeg is missing from AniLife's managed runtime.")
-        val ffprobe = findTool("ffprobe")
-            ?: error("ffprobe is missing from AniLife's managed runtime.")
-        val upscaler = findUpscaler(onProgress)
-        return Tools(ffmpeg, ffprobe, upscaler)
-    }
-
-    private suspend fun findUpscaler(onProgress: (Float) -> Unit): String {
+    private suspend fun findUpscaler(onProgress: (Float) -> Unit, scale: Int): String {
         val configured = System.getProperty("AniLife.upscaler.dir")?.takeIf(String::isNotBlank)?.let { Path.of(it) }
         val directory = configured ?: dependencyDirectory().resolve("upscaler").toPath()
         Files.createDirectories(directory)
         val executable = if (isWindows) "$UPSCALER.exe" else UPSCALER
         val installed = directory.resolve(executable)
         val models = directory.resolve("models")
-        val modelParam = models.resolve("$MODEL-x$MODEL_SCALE.param")
-        val modelWeights = models.resolve("$MODEL-x$MODEL_SCALE.bin")
+        val modelParam = models.resolve("$MODEL-x$scale.param")
+        val modelWeights = models.resolve("$MODEL-x$scale.bin")
         if (Files.isRegularFile(installed) && Files.isRegularFile(modelParam) && Files.isRegularFile(modelWeights)) {
             return installed.toString()
         }
@@ -115,7 +145,7 @@ class AnimeUpscaler {
         require(Files.isRegularFile(installed)) { "The upscaler download didn't contain $executable." }
         installed.toFile().setExecutable(true, false)
         require(Files.isRegularFile(modelParam) && Files.isRegularFile(modelWeights)) {
-            "The upscaler download didn't contain the $MODEL-x$MODEL_SCALE model files."
+            "The upscaler download didn't contain the $MODEL-x$scale model files."
         }
         return installed.toString()
     }
@@ -167,16 +197,18 @@ class AnimeUpscaler {
         }
     }
 
-    private suspend fun detectFps(ffprobe: String, input: Path): String {
+    private suspend fun probe(ffprobe: String, input: Path): Source {
         val output = capture(
             listOf(
                 ffprobe, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate,avg_frame_rate",
+                "-show_entries", "stream=r_frame_rate,height:format=duration",
                 "-of", "default=nw=1:nk=1", input.toString(),
             ),
         )
-        val rate = output.lineSequence().mapNotNull(::parseRate).firstOrNull() ?: 24.0
-        return rate.toString()
+        val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        val rate = lines.firstOrNull { '/' in it }?.let(::parseRate) ?: 24.0
+        val height = lines.mapNotNull(String::toIntOrNull).firstOrNull() ?: 1080
+        return Source(rate, height, lines.lastOrNull()?.toDoubleOrNull() ?: 0.0)
     }
 
     private suspend fun run(
@@ -185,11 +217,15 @@ class AnimeUpscaler {
         tick: (suspend () -> Unit)? = null,
     ) {
         checkActive()
-        val processBuilder = ProcessBuilder(command)
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+        val processBuilder = ProcessBuilder(command).redirectErrorStream(true)
         workingDirectory?.let(processBuilder::directory)
         val process = processBuilder.start()
+        val log = StringBuilder()
+        val drain = Thread {
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line -> synchronized(log) { log.append(line).append('\n') } }
+            }
+        }.apply { isDaemon = true; start() }
         try {
             while (process.isAlive) {
                 checkActive()
@@ -197,8 +233,9 @@ class AnimeUpscaler {
                 delay(300)
             }
             val exit = process.waitFor()
+            drain.join(2_000)
             checkActive()
-            require(exit == 0) { "${command.firstOrNull()} exited with code $exit." }
+            require(exit == 0) { "${File(command.first()).name} exited with code $exit: ${reason(log)}" }
         } finally {
             if (process.isAlive) process.destroyForcibly()
         }
@@ -211,12 +248,15 @@ class AnimeUpscaler {
             val output = process.inputStream.use { it.readBytes() }.toString(Charsets.UTF_8)
             val exit = process.waitFor()
             checkActive()
-            require(exit == 0) { "${command.firstOrNull()} exited with code $exit." }
+            require(exit == 0) { "${File(command.first()).name} exited with code $exit: ${output.trim().lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()}" }
             output
         } finally {
             if (process.isAlive) process.destroyForcibly()
         }
     }
+
+    private fun reason(log: StringBuilder): String =
+        synchronized(log) { log.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty() }.ifBlank { "no output" }
 
     private suspend fun checkActive() {
         if (!coroutineContext.isActive) throw CancellationException("upscale cancelled")
@@ -266,7 +306,7 @@ class AnimeUpscaler {
         }
     }
 
-    private data class Tools(val ffmpeg: String, val ffprobe: String, val upscaler: String)
+    private data class Source(val rate: Double, val height: Int, val duration: Double)
 
     private companion object {
         const val UPSCALER = "realesrgan-ncnn-vulkan"

@@ -20,6 +20,8 @@ internal data class PlayerShortcuts(
     val onTogglePip: () -> Unit,
     val onSpeedChange: (Float) -> Unit,
     val onSubtitleDelay: (Double) -> Unit,
+    val onFrameStep: (Int) -> Unit,
+    val onScreenshot: () -> Unit,
 )
 
 internal fun applyPlayerAction(action: PlayerAction, shortcuts: PlayerShortcuts) {
@@ -38,6 +40,9 @@ internal fun applyPlayerAction(action: PlayerAction, shortcuts: PlayerShortcuts)
         PlayerAction.SUBTITLE_DELAY_EARLIER -> shortcuts.onSubtitleDelay(-0.1)
         PlayerAction.SPEED_UP -> shortcuts.onSpeedChange(0.1f)
         PlayerAction.SPEED_DOWN -> shortcuts.onSpeedChange(-0.1f)
+        PlayerAction.FRAME_STEP_FORWARD -> shortcuts.onFrameStep(1)
+        PlayerAction.FRAME_STEP_BACKWARD -> shortcuts.onFrameStep(-1)
+        PlayerAction.TAKE_SCREENSHOT -> shortcuts.onScreenshot()
     }
 }
 
