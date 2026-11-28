@@ -27,10 +27,12 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +50,8 @@ import me.enivzoy.anilife.app.data.AnimeEpisode
 import me.enivzoy.anilife.app.data.AnimeVideoProviders
 import me.enivzoy.anilife.app.data.AnimeVideoSource
 import me.enivzoy.anilife.app.data.AniListRepository
+import me.enivzoy.anilife.app.data.AniListSync
+import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.ui.AniLifeColors
 import me.enivzoy.anilife.app.ui.PageScrollbar
 import me.enivzoy.anilife.app.ui.RemoteImage
@@ -65,13 +69,15 @@ fun AnimeWatchScreen(
     repository: AniListRepository,
     providers: AnimeVideoProviders,
     initialEpisode: Double? = null,
-    initialAutoPlayConsumed: Boolean = false,
-    onInitialAutoPlay: () -> Unit = {},
     onBack: () -> Unit,
     onPlay: (String, String, Map<String, String>, List<AnimeVideoSource>, Double, String?, List<Double>, Map<Double, String>, Map<Double, String>) -> Unit,
 ) {
     val anilistId = detail.id
     val title = detail.title
+    val aniListEntries by AniListSync.entries.collectAsState()
+    val continueEntries by ContinueStoreInstance.entries.collectAsState()
+    val watchedEpisodes = aniListEntries.firstOrNull { it.anime.id == anilistId }?.progress ?: 0
+    val continueProgress = continueEntries.firstOrNull { it.anime.id == anilistId }?.progress
     var episodes by remember(anilistId) { mutableStateOf<List<AnimeEpisode>>(emptyList()) }
     var loading by remember(anilistId) { mutableStateOf(true) }
     var error by remember(anilistId) { mutableStateOf<String?>(null) }
@@ -79,6 +85,7 @@ fun AnimeWatchScreen(
     var selectedEpisode by remember(anilistId) { mutableStateOf(initialEpisode) }
     var sources by remember(anilistId) { mutableStateOf<List<AnimeVideoSource>>(emptyList()) }
     var resolveAttempt by remember(anilistId) { mutableStateOf(0) }
+    var playWhenResolved by remember(anilistId) { mutableStateOf<Double?>(null) }
     var dub by remember(anilistId) { mutableStateOf(false) }
 
     LaunchedEffect(anilistId) {
@@ -114,6 +121,23 @@ fun AnimeWatchScreen(
     }
 
     val activeEpisode = selectedEpisode
+
+    fun playSource(episodeValue: Double, source: AnimeVideoSource, availableSources: List<AnimeVideoSource>) {
+        val episode = episodes.firstOrNull { it.number == episodeValue }
+        val number = episodeNumber(episodeValue)
+        onPlay(
+            "$title · Episode $number · ${source.provider} ${source.quality ?: source.format.uppercase()}",
+            source.url,
+            source.headers,
+            availableSources,
+            episodeValue,
+            episode?.title?.takeIf(String::isNotBlank),
+            episodes.map(AnimeEpisode::number),
+            episodes.mapNotNull { item -> item.title?.takeIf(String::isNotBlank)?.let { item.number to it } }.toMap(),
+            episodes.mapNotNull { item -> item.thumbnail?.takeIf(String::isNotBlank)?.let { item.number to it } }.toMap(),
+        )
+    }
+
     LaunchedEffect(anilistId, activeEpisode, resolveAttempt, episodes.isNotEmpty()) {
         if (activeEpisode == null || episodes.isEmpty()) return@LaunchedEffect
         val startedAt = System.nanoTime()
@@ -129,37 +153,21 @@ fun AnimeWatchScreen(
             val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
             if (resolved.isEmpty()) {
                 logger.warn { "stream resolution found no servers; episode=$activeEpisode audio=$dub elapsedMs=$elapsedMs" }
+                playWhenResolved = null
                 error = "No ${if (dub) "dub" else "sub"} streams were returned. Try another episode or audio track."
             } else {
                 logger.info { "stream resolved episode=$activeEpisode audio=$dub servers=${resolved.size} elapsedMs=$elapsedMs" }
                 error = null
-                // The initial episode (opened from the detail page) auto-plays once; if the user
-                // returns from the player we keep the resolved servers visible instead of looping
-                // back into playback.
-                val isInitialAutoPlay = resolveAttempt == 0 && initialEpisode != null && activeEpisode == initialEpisode
-                if (isInitialAutoPlay && initialAutoPlayConsumed) {
-                    // Sources are populated above; let the user pick a server manually.
-                } else {
-                    if (isInitialAutoPlay) onInitialAutoPlay()
-                    val best = resolved.first()
-                    val ep = episodeNumber(activeEpisode)
-                    onPlay(
-                        "$title · Episode $ep · ${best.provider} ${best.quality ?: best.format.uppercase()}",
-                        best.url,
-                        best.headers,
-                        resolved,
-                        activeEpisode,
-                        episodes.firstOrNull { it.number == activeEpisode }?.title?.takeIf(String::isNotBlank),
-                        episodes.map(AnimeEpisode::number),
-                        episodes.mapNotNull { ep -> ep.title?.takeIf(String::isNotBlank)?.let { ep.number to it } }.toMap(),
-                        episodes.mapNotNull { ep -> ep.thumbnail?.takeIf(String::isNotBlank)?.let { ep.number to it } }.toMap(),
-                    )
+                if (playWhenResolved == activeEpisode) {
+                    playWhenResolved = null
+                    playSource(activeEpisode, resolved.first(), resolved)
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
             sources = emptyList()
+            playWhenResolved = null
             error = failure.message ?: "Couldn't resolve episode streams."
         } finally {
             resolving = null
@@ -198,8 +206,18 @@ fun AnimeWatchScreen(
                                         episode = episode,
                                         selected = selectedEpisode == episode.number,
                                         loading = resolving == episode.number,
-                                        onClick = {
+                                        progress = episodeWatchProgress(episode.number, watchedEpisodes, continueProgress),
+                                        onSelect = {
                                             selectedEpisode = episode.number
+                                            playWhenResolved = null
+                                            sources = emptyList()
+                                            error = null
+                                            resolving = episode.number
+                                            resolveAttempt++
+                                        },
+                                        onPlay = {
+                                            selectedEpisode = episode.number
+                                            playWhenResolved = episode.number
                                             sources = emptyList()
                                             error = null
                                             resolving = episode.number
@@ -221,7 +239,7 @@ fun AnimeWatchScreen(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("NOW PLAYING", color = AniLifeColors.MutedForeground, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                        Text("AVAILABLE SERVERS", color = AniLifeColors.MutedForeground, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                         Text(
                             activeEpisode?.let { "Episode ${episodeNumber(it)}" } ?: "Select an episode",
                             color = AniLifeColors.Foreground,
@@ -280,18 +298,7 @@ fun AnimeWatchScreen(
                                             val serverName = source.server.takeIf(String::isNotBlank) ?: source.provider
                                             ActionBreadcrumbs.record("Clicked server: $serverName")
                                             logger.info { "server selected provider=${source.provider} server=${source.server} quality=${source.quality}" }
-                                            val ep = episodeNumber(activeEpisode)
-                                            onPlay(
-                                                "$title · Episode $ep · ${source.provider} ${source.quality ?: source.format.uppercase()}",
-                                                source.url,
-                                                source.headers,
-                                                sources,
-                                                activeEpisode,
-                                                episodes.firstOrNull { it.number == activeEpisode }?.title?.takeIf(String::isNotBlank),
-                                                episodes.map(AnimeEpisode::number),
-                                                episodes.mapNotNull { ep -> ep.title?.takeIf(String::isNotBlank)?.let { ep.number to it } }.toMap(),
-                                                episodes.mapNotNull { ep -> ep.thumbnail?.takeIf(String::isNotBlank)?.let { ep.number to it } }.toMap(),
-                                            )
+                                            playSource(activeEpisode, source, sources)
                                         }
                                     }
                                 }
@@ -343,13 +350,34 @@ private fun WatchHero(detail: AnimeDetail, onBack: () -> Unit, episodeCount: Int
 }
 
 @Composable
-private fun EpisodeRow(episode: AnimeEpisode, selected: Boolean, loading: Boolean, onClick: () -> Unit) {
+private fun EpisodeRow(
+    episode: AnimeEpisode,
+    selected: Boolean,
+    loading: Boolean,
+    progress: EpisodeWatchProgress?,
+    onSelect: () -> Unit,
+    onPlay: () -> Unit,
+) {
     val shape = RoundedCornerShape(12.dp)
     Row(
         Modifier.fillMaxWidth().clip(shape)
-            .background(if (selected) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.035f))
-            .border(if (selected) 1.dp else 1.dp, if (selected) Color.White.copy(alpha = 0.45f) else Color.Transparent, shape)
-            .clickable(onClick = onClick).padding(horizontal = 13.dp, vertical = 10.dp),
+            .background(
+                when {
+                    selected -> AniLifeColors.Primary.copy(alpha = 0.12f)
+                    progress?.watched == true -> AniLifeColors.Primary.copy(alpha = 0.07f)
+                    else -> Color.White.copy(alpha = 0.035f)
+                },
+            )
+            .border(
+                1.dp,
+                when {
+                    selected -> AniLifeColors.Primary.copy(alpha = 0.7f)
+                    progress?.watched == true -> AniLifeColors.Primary.copy(alpha = 0.32f)
+                    else -> Color.Transparent
+                },
+                shape,
+            )
+            .clickable(onClick = onSelect).padding(horizontal = 13.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -361,11 +389,22 @@ private fun EpisodeRow(episode: AnimeEpisode, selected: Boolean, loading: Boolea
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Text(episode.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Text(episode.title?.takeIf(String::isNotBlank) ?: "Episode ${episodeNumber(episode.number)}", color = Color.White.copy(alpha = 0.52f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            progress?.let { EpisodeProgressBar(it.fraction, Modifier.padding(top = 5.dp)) }
         }
-        when {
-            loading -> CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-            selected -> Icon(Icons.Rounded.CheckCircle, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(19.dp))
-            else -> Icon(Icons.Rounded.PlayArrow, contentDescription = "Select episode", tint = Color.White.copy(alpha = 0.45f), modifier = Modifier.size(19.dp))
+        if (selected) {
+            Icon(Icons.Rounded.CheckCircle, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        IconButton(onClick = onPlay, enabled = !loading) {
+            if (loading) {
+                CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            } else {
+                Icon(
+                    Icons.Rounded.PlayArrow,
+                    contentDescription = "Play episode ${episodeNumber(episode.number)} using the best available server",
+                    tint = Color.White,
+                )
+            }
         }
     }
 }

@@ -70,6 +70,7 @@ import me.enivzoy.anilife.app.data.DirectMediaDownloader
 import me.enivzoy.anilife.app.data.AppSettings
 import me.enivzoy.anilife.app.data.AniListSync
 import me.enivzoy.anilife.app.data.AnimeVideoProviders
+import me.enivzoy.anilife.app.data.ContinueStoreInstance
 import me.enivzoy.anilife.app.data.AnimeVideoSource
 import me.enivzoy.anilife.app.data.MediaAutoDetector
 import me.enivzoy.anilife.app.ui.AniLifeColors
@@ -123,6 +124,7 @@ fun DetailScreen(
     val localEpisodes by repository.localEpisodes.collectAsState()
     val aniListUser by AniListSync.user.collectAsState()
     val aniListEntries by AniListSync.entries.collectAsState()
+    val continueEntries by ContinueStoreInstance.entries.collectAsState()
     val scope = rememberCoroutineScope()
     var aniListActionError by remember(id) { mutableStateOf<String?>(null) }
     var aniListActionPending by remember(id) { mutableStateOf(false) }
@@ -655,6 +657,10 @@ private fun DetailSections(
     onOpen: (Long) -> Unit,
     onWatch: (Double?) -> Unit,
 ) {
+    val aniListEntries by AniListSync.entries.collectAsState()
+    val continueEntries by ContinueStoreInstance.entries.collectAsState()
+    val watchedEpisodes = aniListEntries.firstOrNull { it.anime.id == detail.id }?.progress ?: 0
+    val continueProgress = continueEntries.firstOrNull { it.anime.id == detail.id }?.progress
     val tabs = buildList {
         add("Episodes")
         if (detail.characters.isNotEmpty()) add("Characters")
@@ -689,9 +695,12 @@ private fun DetailSections(
         }
         Spacer(Modifier.height(16.dp))
         when (tabs[activeTab]) {
-            "Episodes" -> EpisodeSection(detail, providers) { episode ->
-                onWatch(episode)
-            }
+            "Episodes" -> EpisodeSection(
+                detail = detail,
+                providers = providers,
+                aniListWatchedEpisodes = watchedEpisodes,
+                continueProgress = continueProgress,
+            ) { episode -> onWatch(episode) }
             "Characters" -> LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 itemsIndexed(
                     items = detail.characters,
